@@ -146,6 +146,7 @@ public:
         rec_ = rec;
         hd_result_ = hd_res;
         execute_immediately_ = true;
+        is_for_write_ = false;
     }
 
     void Forward(TransactionExecution *txm) override;
@@ -156,6 +157,11 @@ public:
         empty_sv, TableType::RangePartition, TableEngine::None};
     TxRecord *rec_{};
     bool execute_immediately_{true};
+    /**
+     * @brief Whether to read for write: a write intent instead of a read
+     * lock, for a tx that writes the key next.
+     */
+    bool is_for_write_{false};
 
     // out-parameters, to pass result to caller operation
     CcHandlerResult<ReadKeyResult> *hd_result_{};
@@ -2105,6 +2111,174 @@ private:
     // queries for current cluster scale event status for a specific txn.
     std::mutex mux_;
     TxNumber txn_;
+};
+
+/**
+ * @brief Pauses or resumes the cluster gate (EloqDoc docs/cdc-change-stream.md
+ * §6.2, "Translation into the tx service").
+ *
+ * Four stages, the second taken in two steps as a schema op takes its catalog
+ * locks:
+ * 1. read_gate_op_: the record on this node group, read for write, on which
+ *    the precondition is checked: a pause fails with CLUSTER_GATE_HELD on a
+ *    paused gate, before anything else is locked. The write intent lets
+ *    schema ops' read locks through, and a second gate op coordinated by this
+ *    node group waits for it holding nothing.
+ * 2a. acquire_intent_op_: write intents on every node group, with OCC. They
+ *    pass schema ops' read locks, so only another gate op or a cluster scale
+ *    makes this fail, and it fails rather than waits: the op then releases
+ *    everything, backs off 1 to 3 seconds and starts again from stage 1.
+ *    Never waiting while holding the entry anywhere is what keeps gate ops
+ *    and cluster scale from deadlocking. AcquireAllOp drops the read from the
+ *    read set here (DedupRead), as for any key a tx reads before writing, so
+ *    the commit does not validate the version read, which stage 4 replaces.
+ * 2b. acquire_write_op_: write locks on every node group, upgrading the
+ *    intents, with Locking. Once every intent is held no other gate op or
+ *    cluster scale can hold the entry anywhere, so this waits only for schema
+ *    ops already admitted, which hold the read lock through their last post
+ *    write; the queued upgrade keeps new ones out. It is the pause's drain.
+ *    The commit timestamp is raised above its results, so it is above every
+ *    schema op committed before. A failure here also releases and retries.
+ * 3. gate_log_op_: one cluster_gate_log entry, to the tx's log group, which is
+ *    log group 0. It carries the terms of the node groups that granted the
+ *    lock, so a node group that failed over since, and lost the lock with no
+ *    record of it, fails the log rather than miss the install.
+ * 4. install_op_: the post write all of a record that carries the new gate;
+ *    each node group stores it and releases the lock.
+ * A refusal after stage 1 ends the tx, whose abort releases the intent and
+ * fails the request. A refused log, for instance after a node group failed
+ * over, starts over like a conflict. Once the log is written the op only rolls
+ * forward,
+ * retrying the install a second apart; if the coordinator loses leadership
+ * meanwhile, the node group's replay installs the logged value and re-runs
+ * stage 4 alone, with no lock (TransactionExecution::RecoverClusterGate).
+ */
+struct ClusterGateOp : public CompositeTransactionOperation
+{
+public:
+    ClusterGateOp() = delete;
+
+    /**
+     * @brief Builds the op's stages for a transaction.
+     *
+     * @param txm The transaction that runs the op.
+     */
+    explicit ClusterGateOp(TransactionExecution *txm);
+
+    /**
+     * @brief Prepares the op for a new request on a transaction.
+     *
+     * @param op_type Pause or resume.
+     * @param mode What a pause rejects.
+     * @param txm The transaction that runs the op.
+     */
+    void Reset(ClusterGateOpType op_type,
+               ClusterGate::Mode mode,
+               TransactionExecution *txm);
+
+    void Forward(TransactionExecution *txm) override;
+
+    /**
+     * @brief Positions a recovered op right after its log entry, so that the
+     * next Forward() runs the install.
+     *
+     * @param gate The logged value.
+     * @param commit_ts The entry's commit timestamp, the gate's version.
+     */
+    void ResumeAtInstall(const ClusterGate &gate, uint64_t commit_ts);
+
+    ReadLocalOperation read_gate_op_;  ///< Stage 1: the read, for write.
+    AcquireAllOp acquire_intent_op_;   ///< Stage 2a: write intents, OCC.
+    AcquireAllOp acquire_write_op_;    ///< Stage 2b: the write locks.
+    WriteToLogOp gate_log_op_;         ///< Stage 3: the gate's log entry.
+    PostWriteAllOp install_op_;        ///< Stage 4, or a release.
+
+private:
+    /**
+     * @brief Makes a stage current and runs it, or runs it again.
+     *
+     * The op's own copy of ForwardToSubOperation(), whose definition is local
+     * to tx_operation.cpp.
+     *
+     * @param txm The transaction that runs the op.
+     * @param stage The stage to run.
+     */
+    template <typename Op>
+    void RunStage(TransactionExecution *txm, Op *stage);
+
+    /**
+     * @brief Gives up this attempt before the log is written: releases every
+     * lock the tx holds on the entry with a post write all at
+     * tx_op_failed_ts_; once that
+     * is done, the op backs off 1 to 3 seconds and starts again from stage 1,
+     * re-checking the precondition.
+     *
+     * @param txm The transaction that runs the op.
+     * @param stage What failed, for the log.
+     */
+    void RestartLater(TransactionExecution *txm, const char *stage);
+
+    /**
+     * @brief The second half of RestartLater(), once the release is done:
+     * drops the read, whose lock went with the release, resets the stages and
+     * sleeps before stage 1.
+     *
+     * @param txm The transaction that runs the op.
+     */
+    void BackOffAndRestart(TransactionExecution *txm);
+
+    /**
+     * @brief Runs stage 4 again after a second, as long as it fails: on a
+     * node group that has not finished its replay, which refuses the post
+     * write until it leads, or on one that is failing over.
+     *
+     * @param txm The transaction that runs the op.
+     */
+    void RetryInstallLater(TransactionExecution *txm);
+
+    /**
+     * @brief Fills the log entry: the new gate, the commit timestamp and the
+     * terms of the node groups whose locks the tx holds.
+     *
+     * @param txm The transaction that runs the op.
+     */
+    void FillGateLogRequest(TransactionExecution *txm);
+
+    /**
+     * @brief Ends the op without a post write all: after stage 1, when only
+     * the write intent there is held, which the tx's abort releases, or when
+     * the coordinator is no longer leader, when orphan lock recovery or the
+     * node group's replay resolves what the tx still holds.
+     *
+     * @param txm The transaction that runs the op.
+     * @param err What the request reports.
+     */
+    void ForceToFinish(TransactionExecution *txm, TxErrorCode err);
+
+    /**
+     * @brief Pops the op, returns it to LocalCcShards' pool, answers the
+     * request and commits the tx, or aborts it if the op failed.
+     *
+     * @warning Nothing may read the op after the pool push: another request
+     * may take it and reset it. What the answer needs is copied before.
+     *
+     * @param txm The transaction that runs the op.
+     */
+    void Finish(TransactionExecution *txm);
+
+    ClusterGateOpType op_type_{ClusterGateOpType::kPause};
+    ClusterGate::Mode mode_{ClusterGate::Mode::kDdl};
+    /** @brief What the request reports if the op does not succeed. */
+    TxErrorCode error_{TxErrorCode::NO_ERROR};
+    /** @brief The release under way is RestartLater()'s, not a failure's. */
+    bool restart_after_release_{false};
+    /** @brief Attempts so far, for the log. */
+    uint32_t attempt_{0};
+
+    CcHandlerResult<ReadKeyResult> read_result_;  ///< Stage 1's result.
+    ClusterConfigRecord read_rec_;  ///< Stage 1's copy of the record.
+    /** @brief The record stage 4 installs: the new gate, no configs. */
+    ClusterConfigRecord install_rec_;
 };
 
 struct DataMigrationOp : public CompositeTransactionOperation

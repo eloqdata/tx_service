@@ -99,6 +99,18 @@ enum class ClusterScaleOpType
     AddNodeGroupPeers
 };
 
+/**
+ * @brief What a ClusterGateTxRequest does to the cluster gate (EloqDoc
+ * docs/cdc-change-stream.md §6.2).
+ */
+enum class ClusterGateOpType : uint8_t
+{
+    /// Close the gate; fails with CLUSTER_GATE_HELD if it is already paused.
+    kPause = 0,
+    /// Open the gate; opening an open gate changes nothing.
+    kResume = 1,
+};
+
 enum class TxnStatus
 {
     Ongoing = 0,

@@ -25,6 +25,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "cc/cc_handler.h"
@@ -64,6 +65,7 @@ struct SplitFlushTxRequest;
 struct AnalyzeTableTxRequest;
 struct BroadcastStatisticsTxRequest;
 struct ClusterScaleTxRequest;
+struct ClusterGateTxRequest;
 struct SchemaRecoveryTxRequest;
 struct RangeSplitRecoveryTxRequest;
 struct UnlockTuple;
@@ -162,6 +164,12 @@ public:
     void ProcessTxRequest(AnalyzeTableTxRequest &analyze_req);
     void ProcessTxRequest(BroadcastStatisticsTxRequest &analyze_req);
     void ProcessTxRequest(ClusterScaleTxRequest &scale_req);
+    /**
+     * @brief Starts a ClusterGateOp that pauses or resumes the cluster gate.
+     *
+     * @param gate_req The request; its result is the op's commit timestamp.
+     */
+    void ProcessTxRequest(ClusterGateTxRequest &gate_req);
     void ProcessTxRequest(SchemaRecoveryTxRequest &recover_req);
     void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
     void ProcessTxRequest(BatchReadTxRequest &batch_read_req);
@@ -300,6 +308,21 @@ public:
     void RecoverClusterScale(const ::txlog::ClusterScaleOpMessage &scale_msg,
                              bool dm_started,
                              bool dm_finished);
+
+    /**
+     * @brief Resumes a cluster gate op whose log entry was written, at its
+     * install, on the node group that coordinated it (EloqDoc
+     * docs/cdc-change-stream.md §6.2).
+     *
+     * The caller has set the recovered tx's number, term and commit timestamp
+     * (SetRecoverTxState). The op takes no lock: it re-sends the install of
+     * the logged value to every node group, which stores it and releases the
+     * cluster config write lock wherever the tx still holds it, and does
+     * nothing elsewhere; then it commits the tx. Nobody waits on it.
+     *
+     * @param gate_msg The logged gate value.
+     */
+    void RecoverClusterGate(const ::txlog::ClusterGateLogMessage &gate_msg);
 
     /**
      * @brief Acquires the exclusive forward latch.
@@ -619,17 +642,43 @@ private:
     // can help us to locate the previous empty cc entry quickly.
     CcEntryAddr cache_miss_read_cce_addr_;
 
-    std::unique_ptr<UpsertTableOp> schema_op_;
+    /**
+     * @brief The composite op slot as a slot for an op of type Op.
+     *
+     * Switches the slot to Op first if it holds another kind, which drops
+     * that op: a txm runs one tx request at a time.
+     *
+     * @return The slot's pointer, null until an op is put in it.
+     */
+    template <typename Op>
+    std::unique_ptr<Op> &CompositeOpSlot()
+    {
+        if (auto *slot = std::get_if<std::unique_ptr<Op>>(&composite_op_))
+        {
+            return *slot;
+        }
+        return composite_op_.template emplace<std::unique_ptr<Op>>();
+    }
 
-    std::unique_ptr<SplitFlushRangeOp> split_flush_op_;
-
-    std::unique_ptr<UpsertTableIndexOp> index_op_;
-
-    std::unique_ptr<ClusterScaleOp> cluster_scale_op_;
-    std::unique_ptr<DataMigrationOp> migration_op_;
-
-    std::unique_ptr<InvalidateTableCacheCompositeOp>
-        invalidate_table_cache_composite_op_;
+    /**
+     * @brief The composite op of the tx request this txm runs, if it needs
+     * one.
+     *
+     * A txm runs one tx request at a time, so one slot holds whichever kind
+     * of op that request needs. The ops come from LocalCcShards' pools and go
+     * back to them when they finish: a remote response that arrives after its
+     * op finished still reads the op's cc handler result, so an op must
+     * outlive its request.
+     */
+    std::variant<std::monostate,
+                 std::unique_ptr<UpsertTableOp>,
+                 std::unique_ptr<SplitFlushRangeOp>,
+                 std::unique_ptr<UpsertTableIndexOp>,
+                 std::unique_ptr<ClusterScaleOp>,
+                 std::unique_ptr<ClusterGateOp>,
+                 std::unique_ptr<DataMigrationOp>,
+                 std::unique_ptr<InvalidateTableCacheCompositeOp>>
+        composite_op_;
 
     std::unordered_map<
         uint64_t,
@@ -664,7 +713,8 @@ private:
     TxResult<
         std::tuple<const TxKey *, const TxRecord *, RecordStatus, uint64_t>>
         *kvp_resp_;
-    // Scan open result
+    // Scan open result, and the commit timestamp of a ClusterGateTxRequest
+    // (null for a recovered gate op)
     TxResult<size_t> *uint64_resp_;
     // Response whose returned result is vector<int64_t>
     TxResult<std::vector<int64_t>> *int64_vec_resp_;
@@ -793,6 +843,7 @@ private:
     friend struct BroadcastStatisticsOp;
     friend struct KickoutDataOp;
     friend struct ClusterScaleOp;
+    friend struct ClusterGateOp;
     friend struct NoOp;
     template <typename ResultType>
     friend struct AsyncOp;

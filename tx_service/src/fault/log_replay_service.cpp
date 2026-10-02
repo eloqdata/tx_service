@@ -574,6 +574,41 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             }
         }
 
+        // The cluster gate slot (EloqDoc docs/cdc-change-stream.md §6.2),
+        // after cluster scale's replay, which caches node group configs in the
+        // same cc entry's payload, and before any schema op, so that the
+        // recovered node group enforces the gate before it serves DDL.
+        if (msg.has_cluster_gate_msg())
+        {
+            const std::string &gate_blob =
+                msg.cluster_gate_msg().cluster_gate_blob();
+            ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
+            cc_req->Reset(
+                cc_ng_id,
+                cc_ng_term,
+                cluster_config_ccm_name_sv,
+                TableType::ClusterConfig,
+                TableEngine::None,
+                std::string_view(gate_blob.data(), gate_blob.length()),
+                msg.cluster_gate_msg().commit_ts(),
+                msg.cluster_gate_msg().txn(),
+                mux,
+                status,
+                on_fly_cnt,
+                recovery_error,
+                is_lock_recovery);
+            cc_req->SetClusterGate();
+
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
+            local_shards_.EnqueueCcRequest(0, cc_req);
+            WaitAndClearRequests(
+                stream_id, mux, on_fly_cnt, status, recovery_error);
+            if (recovery_error)
+            {
+                return 0;
+            }
+        }
+
         // process schema ops before processing data ops
         for (const ::txlog::ReplaySchemaMsg &schema_op_msg :
              msg.schema_op_msgs())

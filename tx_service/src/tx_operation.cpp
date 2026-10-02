@@ -289,6 +289,7 @@ void ReadLocalOperation::Reset()
     rec_ = nullptr;
     hd_result_ = nullptr;
     execute_immediately_ = true;
+    is_for_write_ = false;
 }
 
 void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
@@ -3360,13 +3361,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
-            assert(this == txm->split_flush_op_.get());
+            assert(this == txm->CompositeOpSlot<SplitFlushRangeOp>().get());
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                shards->split_flush_range_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(shards->op_pool_mux_);
             shards->split_flush_range_op_pool_.emplace_back(
-                std::move(txm->split_flush_op_));
-            assert(txm->split_flush_op_ == nullptr);
+                std::move(txm->CompositeOpSlot<SplitFlushRangeOp>()));
+            assert(txm->CompositeOpSlot<SplitFlushRangeOp>() == nullptr);
         }
         return;
     }
@@ -4118,13 +4118,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
-            assert(this == txm->split_flush_op_.get());
+            assert(this == txm->CompositeOpSlot<SplitFlushRangeOp>().get());
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                shards->split_flush_range_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(shards->op_pool_mux_);
             shards->split_flush_range_op_pool_.emplace_back(
-                std::move(txm->split_flush_op_));
-            assert(txm->split_flush_op_ == nullptr);
+                std::move(txm->CompositeOpSlot<SplitFlushRangeOp>()));
+            assert(txm->CompositeOpSlot<SplitFlushRangeOp>() == nullptr);
         }
     }
 }
@@ -5714,9 +5713,9 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
 
         {
             auto shards = Sharder::Instance().GetLocalCcShards();
-            std::lock_guard<std::mutex> lk(shards->cluster_scale_op_mux_);
+            std::lock_guard<std::mutex> lk(shards->op_pool_mux_);
             shards->cluster_scale_op_pool_.push_back(
-                std::move(txm->cluster_scale_op_));
+                std::move(txm->CompositeOpSlot<ClusterScaleOp>()));
         }
 
         if (txm->CommitTs() != tx_op_failed_ts_)
@@ -6428,10 +6427,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
             {
                 auto shards = Sharder::Instance().GetLocalCcShards();
-                std::lock_guard<std::mutex> lk(
-                    shards->data_migration_op_pool_mux_);
+                std::lock_guard<std::mutex> lk(shards->op_pool_mux_);
                 shards->migration_op_pool_.push_back(
-                    std::move(txm->migration_op_));
+                    std::move(txm->CompositeOpSlot<DataMigrationOp>()));
             }
             // Abort and recyle txm
             txm->Abort();
@@ -7275,8 +7273,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
         {
             auto shards = Sharder::Instance().GetLocalCcShards();
-            std::lock_guard<std::mutex> lk(shards->data_migration_op_pool_mux_);
-            shards->migration_op_pool_.push_back(std::move(txm->migration_op_));
+            std::lock_guard<std::mutex> lk(shards->op_pool_mux_);
+            shards->migration_op_pool_.push_back(
+                std::move(txm->CompositeOpSlot<DataMigrationOp>()));
         }
         // Commit the tx and recyle txm
         txm->Commit();
@@ -7810,9 +7809,9 @@ void InvalidateTableCacheCompositeOp::Forward(TransactionExecution *txm)
         txm->state_stack_.pop_back();
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
         assert(txm->state_stack_.empty());
-        std::unique_lock<std::mutex> lk(shards->invalidate_table_cache_op_mux_);
+        std::unique_lock<std::mutex> lk(shards->op_pool_mux_);
         shards->invalidate_table_cache_op_pool_.emplace_back(
-            std::move(txm->invalidate_table_cache_composite_op_));
+            std::move(txm->CompositeOpSlot<InvalidateTableCacheCompositeOp>()));
     }
 }
 

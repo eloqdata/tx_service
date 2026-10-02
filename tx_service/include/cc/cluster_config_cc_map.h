@@ -143,10 +143,12 @@ public:
             // (2) the local time.
             acquire_all_result.last_vali_ts_ =
                 std::max(shard_->LastReadTs(), shard_->Now());
-            uint64_t lock_addr =
-                cce_ptr == nullptr ? 0
-                                   : reinterpret_cast<uint64_t>(
-                                         cce_ptr->GetKeyGapLockAndExtraData());
+            // The entry's lock address, also on a first execution (cce_ptr is
+            // set only on resume): AcquireAllOp drops a read of the entry the
+            // tx made before from its read set by this address, and an address
+            // of 0 matches no read.
+            uint64_t lock_addr = reinterpret_cast<uint64_t>(
+                cc_entry.GetKeyGapLockAndExtraData());
             acquire_all_result.local_cce_addr_.SetCceLock(
                 lock_addr, ng_term, req.NodeGroupId(), shard_->LocalCoreId());
             acquire_all_result.commit_ts_ = cc_entry.CommitTs();
@@ -292,10 +294,8 @@ public:
                 neg_inf_.payload_.cur_payload_->SetClusterGate(
                     *config_rec->GetClusterGate());
             }
-            bool was_dirty = neg_inf_.IsDirty();
             neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
                                               RecordStatus::Normal);
-            OnCommittedUpdate(&neg_inf_, was_dirty);
             ReleaseCceLock(lock, &neg_inf_, txn, req.NodeGroupId());
         }
 
@@ -315,6 +315,10 @@ public:
             // No longer candidate leader, stop immediately
             req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
+        }
+        if (req.IsClusterGate())
+        {
+            return ReplayClusterGate(req);
         }
         shard_->SetBucketMigrating(true);
         const std::string_view &content = req.LogContentView();
@@ -548,12 +552,85 @@ public:
                 cluster_scale_txn, tx_candidate_term, req.CommitTs());
             txm->RecoverClusterScale(scale_op_msg, dm_started, dm_finished);
         }
+        neg_inf_.SetCommitTsPayloadStatus(
+            Sharder::Instance().ClusterConfigVersion(), RecordStatus::Normal);
+
+        req.SetFinish();
+        return true;
+    }
+
+private:
+    /**
+     * @brief Replays log group 0's cluster gate slot (EloqDoc
+     * docs/cdc-change-stream.md §6.2): installs the slot's value, however old
+     * it is, so that a recovered node group enforces the same gate as the
+     * others.
+     *
+     * The slot holds the latest gate ever logged, and nothing installs a value
+     * it has not logged first, so the slot is never older than what the map
+     * holds. The value is set in place, as the gate's post write sets it:
+     * cluster scale's replay, which ran before this one, cached node group
+     * configs in the same payload for an asynchronous Sharder update. The
+     * entry's commit timestamp only grows: scale's replay may have left it at
+     * a config version above the gate's.
+     *
+     * On the node group that coordinated the gate tx, a recovery tx then
+     * re-sends the install to every node group, under the same tx, to release
+     * the cluster config write lock wherever the tx still holds it (orphan
+     * lock recovery leaves a logged gate tx's lock for this). It takes no lock
+     * or intent: nothing in a gate op follows its log but the install, which
+     * stores and releases only where the tx holds the lock and does nothing
+     * elsewhere. That install reaches this node group too, where the tx holds
+     * no lock after the failover, so the post write all's no-lock branch
+     * finishes without storing anything: this is why the replay installs the
+     * value here itself first. Holding the lock here would also block the
+     * schema op recovery that replays next, whose recovery tx reads the
+     * cluster config, while the install waits for this node group to lead.
+     *
+     * @param req The replay request; its blob is a ClusterGateLogMessage.
+     * @return true, the request is finished.
+     */
+    bool ReplayClusterGate(ReplayLogCc &req)
+    {
+        const std::string_view &content = req.LogContentView();
+        ::txlog::ClusterGateLogMessage gate_msg;
+        if (!gate_msg.ParseFromArray(content.data(), content.length()))
         {
-            bool was_dirty = neg_inf_.IsDirty();
-            neg_inf_.SetCommitTsPayloadStatus(
-                Sharder::Instance().ClusterConfigVersion(),
-                RecordStatus::Normal);
-            OnCommittedUpdate(&neg_inf_, was_dirty);
+            LOG(ERROR) << "Cluster gate replay: corrupt slot, txn: "
+                       << req.Txn();
+            req.AbortCcRequest(CcErrorCode::UNDEFINED_ERR);
+            return false;
+        }
+        ClusterGate gate;
+        gate.mode = gate_msg.mode() ==
+                            ::txlog::ClusterGateLogMessage_GateMode_GateDdlDml
+                        ? ClusterGate::Mode::kDdlDml
+                        : ClusterGate::Mode::kDdl;
+        gate.paused = gate_msg.paused();
+        neg_inf_.payload_.cur_payload_->SetClusterGate(gate);
+        if (req.CommitTs() > neg_inf_.CommitTs())
+        {
+            neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
+                                              RecordStatus::Normal);
+        }
+        LOG(INFO) << "Cluster gate replay: installed "
+                  << (gate.paused ? "paused" : "open") << " at "
+                  << req.CommitTs() << ", txn: " << req.Txn();
+
+        const TxNumber gate_txn = req.Txn();
+        if (((gate_txn >> 32L) >> 10) == req.NodeGroupId())
+        {
+            LOG(INFO) << "Recovering cluster gate tx, txn: " << gate_txn
+                      << ", term: "
+                      << Sharder::Instance().CandidateLeaderTerm(
+                             req.NodeGroupId());
+            TxService *tx_service = shard_->local_shards_.GetTxService();
+            TransactionExecution *txm = tx_service->NewTx();
+            txm->SetRecoverTxState(
+                gate_txn,
+                Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId()),
+                req.CommitTs());
+            txm->RecoverClusterGate(gate_msg);
         }
 
         req.SetFinish();

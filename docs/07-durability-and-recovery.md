@@ -231,6 +231,8 @@ processed by the `replay_notify` thread. `ProcessRecoverTxTask` (`log_replay_ser
 | `Committed` | log record exists | log group ships that tx's records back over a replay stream flagged `is_lock_recovery=true`; replay only applies a record if the tx still holds a write lock/intent on the entry (`object_cc_map.h:2289-2299`), then releases it |
 | `RecoverError` | log group unreachable | do nothing; next conflicting tx retries |
 
+A tx found as a multi-stage op instead of a data record (a schema, range-split, cluster-scale or migration op, or the cluster gate tx that set log group 0's gate slot) is also `Committed`, but nothing is shipped: its meta write locks stay until its coordinator's recovery releases them. For a gate tx that is the install its coordinator's node group re-sends on replay ([06](06-distribution-and-clustering.md), "Gate replay"); a gate tx that never logged is found nowhere and its locks are cleared.
+
 ## 6. MVCC & archives
 
 - **Version chains**: on update of a versioned entry, `CcEntry::ArchiveBeforeUpdate` (`cc_entry.h:1101-1125`) moves the current payload to the front of the per-entry `archives_` list (`std::list<VersionRecord>`, descending `commit_ts`). `AddArchiveRecord(s)` back-fill fetched historical versions; `KickOutArchiveRecords(oldest_active_tx_ts)` (`:1207-1240`) trims versions no active tx can read.
