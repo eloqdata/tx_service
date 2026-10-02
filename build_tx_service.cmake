@@ -200,6 +200,7 @@ SET(ELOQ_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/dead_lock_check.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_index_operation.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/tx_cluster_gate_operation.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/tx_upsert_table_operation.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/sk_generator.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/data_sync_task.cpp

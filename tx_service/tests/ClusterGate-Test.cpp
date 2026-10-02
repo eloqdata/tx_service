@@ -19,16 +19,25 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+// Before Catch2, whose CHECK replaces the glog CHECK that brpc headers use.
+#include <brpc/channel.h>
+#include <brpc/server.h>
+#include <brpc/stream.h>
+#include <bthread/mutex.h>
+
 // Let Catch provide main():
+#include <atomic>
 #include <catch2/catch_all.hpp>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-// For Sharder::local_shards_, which only Sharder::Init sets (see Fixture).
+// For Sharder's local shards and candidate terms, which only Sharder::Init
+// sets (see Fixture).
 #define private public
 #include "cc/cc_handler_result.h"
 #include "cc/cc_req_base.h"
@@ -37,18 +46,21 @@
 #include "cc/non_blocking_lock.h"
 #include "cc_shard.h"
 #include "cluster_config_record.h"
+#include "fault/log_replay_service.h"
 #include "include/mock/mock_catalog_factory.h"
 #include "local_cc_shards.h"
+#include "log.pb.h"
 #include "sharder.h"
 #undef private
 
 /**
  * @file
- * @brief The cluster gate's carrier (EloqDoc docs/cdc-change-stream.md §6.2;
- * plan D1, D2): the optional gate a ClusterConfigRecord carries through every
- * copy and its serialization, and the cluster config cc map's gate-only post
- * write all, which stores the gate only while the request's tx owns the lock
- * and never touches Sharder.
+ * @brief The cluster gate's carrier and replay (EloqDoc
+ * docs/cdc-change-stream.md §6.2; plan D1, D2, D6): the optional gate a
+ * ClusterConfigRecord carries through every copy and its serialization, the
+ * cluster config cc map's gate-only post write all, which stores the gate only
+ * while the request's tx owns the lock and never touches Sharder, and the
+ * map's replay of log group 0's gate slot, which installs the value in place.
  */
 
 namespace txservice
@@ -252,6 +264,55 @@ public:
         rec = *neg_inf_.payload_.cur_payload_;
         return rec;
     }
+
+    /**
+     * @brief The entry's commit timestamp.
+     *
+     * @return The timestamp.
+     */
+    uint64_t EntryCommitTs()
+    {
+        return neg_inf_.CommitTs();
+    }
+
+    /**
+     * @brief Sets the entry's commit timestamp, as a topology change leaves
+     * it.
+     *
+     * @param ts The timestamp.
+     */
+    void SetEntryCommitTs(uint64_t ts)
+    {
+        neg_inf_.SetCommitTsPayloadStatus(ts, RecordStatus::Normal);
+    }
+
+    /**
+     * @brief Caches node group configs in the payload, as cluster scale's
+     * replay does for its asynchronous Sharder update.
+     *
+     * @param ng_cnt How many node groups the configs name.
+     */
+    void CacheConfigs(uint32_t ng_cnt)
+    {
+        auto configs = std::make_unique<
+            std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
+        for (uint32_t ng = 0; ng < ng_cnt; ++ng)
+        {
+            configs->try_emplace(
+                ng, std::vector<NodeConfig>{NodeConfig(ng, "127.0.0.1", 8600)});
+        }
+        neg_inf_.payload_.cur_payload_->SetNodeGroupConfigs(std::move(configs));
+    }
+
+    /**
+     * @brief How many node groups the payload's cached configs name.
+     *
+     * @return The count.
+     */
+    size_t CachedConfigCount()
+    {
+        return neg_inf_.payload_.cur_payload_->GetNodeGroupConfigs().size();
+    }
 };
 
 /**
@@ -311,6 +372,10 @@ struct Fixture
         // from Sharder's LocalCcShards. Only Sharder::Init sets that, and it
         // also starts the node's streams and host manager.
         Sharder::Instance().local_shards_ = &local_cc_shards;
+        // A replay runs while its node group is a candidate leader. The
+        // terms are read only once the node's cc nodes are up.
+        Sharder::Instance().candidate_leader_term_cache_[kNg].store(kTerm);
+        Sharder::Instance().cc_nodes_init_.store(true);
         map = std::make_unique<GateTestMap>(&shard);
     }
 
@@ -411,6 +476,110 @@ TEST_CASE("a post write all whose tx no longer holds the lock stores nothing",
     CHECK(F().map->WriteLockHolder() == holder);
     REQUIRE(PostWriteGate(holder, base + 3, Gate(true)));
     CHECK(F().map->WriteLockHolder() == 0);
+}
+/**
+ * @brief A gate tx coordinated by another node group, whose replay here only
+ * installs the value: the coordinator's replay also starts a recovery tx,
+ * which needs a running TxService.
+ *
+ * @param seq The tx's sequence number within its node group.
+ * @return The tx number.
+ */
+TxNumber RemoteGateTxn(uint32_t seq)
+{
+    return (static_cast<TxNumber>(kNg + 1) << 42) | seq;
+}
+
+/**
+ * @brief Replays a cluster gate slot into the map, as RecoveryService does
+ * for the item log group 0 ships, and waits for it.
+ *
+ * @param txn The gate tx that set the slot.
+ * @param commit_ts The slot's version.
+ * @param blob The slot's value, a serialized ClusterGateLogMessage.
+ * @return false if the replay reported a recovery error.
+ */
+bool ReplayGate(TxNumber txn, uint64_t commit_ts, const std::string &blob)
+{
+    bthread::Mutex mux;
+    std::atomic<fault::RecoveryService::WaitingStatus> status{
+        fault::RecoveryService::WaitingStatus::Active};
+    std::atomic<size_t> on_fly_cnt{1};
+    bool recovery_error = false;
+    ReplayLogCc req;
+    req.Reset(kNg,
+              kTerm,
+              cluster_config_ccm_name_sv,
+              TableType::ClusterConfig,
+              TableEngine::None,
+              blob,
+              commit_ts,
+              txn,
+              mux,
+              status,
+              on_fly_cnt,
+              recovery_error);
+    req.SetClusterGate();
+    F().map->Execute(req);
+    CHECK(on_fly_cnt.load() == 0);
+    return !recovery_error;
+}
+
+/**
+ * @brief A slot's value as the log service ships it.
+ *
+ * @param paused Whether the gate is paused.
+ * @return The serialized ClusterGateLogMessage.
+ */
+std::string SlotBlob(bool paused)
+{
+    ::txlog::ClusterGateLogMessage msg;
+    msg.set_mode(::txlog::ClusterGateLogMessage_GateMode_GateDdl);
+    msg.set_paused(paused);
+    std::string blob;
+    msg.SerializeToString(&blob);
+    return blob;
+}
+
+TEST_CASE(
+    "a replayed slot installs its gate in place, keeping the configs scale's "
+    "replay cached and the larger commit timestamp",
+    "[ClusterGate]")
+{
+    const uint64_t base = F().map->EntryCommitTs() + 100000;
+    // What cluster scale's replay, which runs first, leaves behind.
+    F().map->CacheConfigs(2);
+    F().map->SetEntryCommitTs(base + 100);
+
+    // A pause logged before that topology change.
+    REQUIRE(ReplayGate(RemoteGateTxn(301), base + 50, SlotBlob(true)));
+    REQUIRE(F().map->StoredGate().has_value());
+    CHECK(*F().map->StoredGate() == Gate(true));
+    CHECK(F().map->ReadCopy().GatesSchemaOps());
+    CHECK(F().map->CachedConfigCount() == 2);
+    CHECK(F().map->EntryCommitTs() == base + 100);
+
+    // A resume logged after it raises the commit timestamp.
+    REQUIRE(ReplayGate(RemoteGateTxn(302), base + 200, SlotBlob(false)));
+    CHECK(*F().map->StoredGate() == Gate(false));
+    CHECK_FALSE(F().map->ReadCopy().GatesSchemaOps());
+    CHECK(F().map->CachedConfigCount() == 2);
+    CHECK(F().map->EntryCommitTs() == base + 200);
+
+    // Replay takes no lock: the next gate op or schema op finds it free.
+    CHECK(F().map->WriteLockHolder() == 0);
+}
+
+TEST_CASE("a corrupt slot fails the replay rather than install nothing",
+          "[ClusterGate]")
+{
+    const std::optional<ClusterGate> before = F().map->StoredGate();
+    // A length-delimited field whose length runs past the end.
+    CHECK_FALSE(ReplayGate(RemoteGateTxn(303),
+                           F().map->EntryCommitTs() + 1,
+                           std::string("\x12\x05"
+                                       "ab")));
+    CHECK(F().map->StoredGate() == before);
 }
 }  // namespace
 }  // namespace txservice

@@ -1226,6 +1226,50 @@ struct ClusterScaleTxRequest
     const std::vector<bool> *is_candidate_{nullptr};
 };
 
+/**
+ * @brief Pauses or resumes the cluster gate, which keeps new schema ops out
+ * while EloqDoc's change data capture bootstrap copies the catalog (EloqDoc
+ * docs/cdc-change-stream.md §6.2).
+ *
+ * Runs a ClusterGateOp: the cluster config write lock on every node group,
+ * the precondition read under it, one cluster gate log entry, and the install
+ * on every node group. The request is the whole transaction: the op commits or
+ * aborts it on its own, so the caller only waits. Its result is the op's
+ * commit timestamp, the gate's new version; a pause reports it as pause_ts,
+ * which is above every schema op committed before the gate closed.
+ *
+ * @warning Submit it on a transaction initialized with log_group_id_ = 0, so
+ * that every gate log entry lands in log group 0, whose slot is the gate's
+ * only history.
+ */
+struct ClusterGateTxRequest
+    : public TemplateTxRequest<ClusterGateTxRequest, uint64_t>
+{
+    /**
+     * @brief Builds the request.
+     *
+     * @param op_type Pause or resume.
+     * @param mode What a pause rejects; ignored by a resume.
+     * @param yield_fptr Yields the caller's coroutine while it waits, or null
+     *        to block the thread.
+     * @param resume_fptr Resumes the caller's coroutine.
+     * @param txm The transaction the request runs on.
+     */
+    ClusterGateTxRequest(ClusterGateOpType op_type,
+                         ClusterGate::Mode mode,
+                         const std::function<void()> *yield_fptr = nullptr,
+                         const std::function<void()> *resume_fptr = nullptr,
+                         TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          op_type_(op_type),
+          mode_(mode)
+    {
+    }
+
+    ClusterGateOpType op_type_;  ///< Pause or resume.
+    ClusterGate::Mode mode_;     ///< What a pause rejects.
+};
+
 struct SchemaRecoveryTxRequest
     : public TemplateTxRequest<SchemaRecoveryTxRequest, UpsertResult>
 {

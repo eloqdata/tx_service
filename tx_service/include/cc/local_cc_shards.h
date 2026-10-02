@@ -83,6 +83,7 @@ class RemoteCcHandler;
 class Checkpointer;
 class TxService;
 struct ClusterScaleOp;
+struct ClusterGateOp;
 struct DataMigrationOp;
 struct InvalidateTableCacheCompositeOp;
 class SkGenerator;
@@ -1932,7 +1933,7 @@ public:
     response CcMessage should always be valid(memory not being freed). This is
     important in the case where network timeout happens and remote response(sent
     by retry) arrives after UpsertTableOp has finished(finished means txm has
-    been reset and schema_op_ unique pointer in txm has been set to null).
+    been reset and its composite op slot has been cleared).
 
     To avoid this pointer invalidation, the UpsertTableOp is moved from txm to
     local_cc_shards once finished the last step of the schema op to maintain
@@ -1942,26 +1943,33 @@ public:
 
     */
     std::vector<std::unique_ptr<UpsertTableOp>> table_schema_op_pool_;
-    std::mutex table_schema_op_pool_mux_;
     std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;
-    std::mutex split_flush_range_op_pool_mux_;
     std::vector<std::unique_ptr<UpsertTableIndexOp>> table_index_op_pool_;
     std::vector<std::unique_ptr<SkGenerator>> sk_generator_pool_;
-    std::mutex table_index_op_pool_mux_;
 
     // Since there's only 1 cluster scale event at a time across the cluster,
     // we don't need a pool for it. We just need to make sure that the op is not
     // invalidated in case late remote cc response comes in.
 
     std::vector<std::unique_ptr<ClusterScaleOp>> cluster_scale_op_pool_;
-    std::mutex cluster_scale_op_mux_;
+
+    /**
+     * @brief Finished cluster gate ops. An op outlives its request because a
+     * remote response that comes in after the op finished still reads the cc
+     * handler result of one of its stages, which the op owns.
+     */
+    std::vector<std::unique_ptr<ClusterGateOp>> cluster_gate_op_pool_;
 
     std::vector<std::unique_ptr<InvalidateTableCacheCompositeOp>>
         invalidate_table_cache_op_pool_;
-    std::mutex invalidate_table_cache_op_mux_;
 
-    std::mutex data_migration_op_pool_mux_;
     std::vector<std::unique_ptr<DataMigrationOp>> migration_op_pool_;
+
+    /**
+     * @brief Guards every op pool above and sk_generator_pool_. Each user holds
+     * it only to take or return one object, never while taking another lock.
+     */
+    std::mutex op_pool_mux_;
 
     // protects the table ranges heap to avoid concurrent memory requests by
     // multiple threads.

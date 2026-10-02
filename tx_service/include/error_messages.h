@@ -136,6 +136,13 @@ enum struct TxErrorCode : uint16_t
      * docs/cdc-change-stream.md §6.2). Retriable once the gate resumes.
      */
     CLUSTER_GATED,
+
+    /**
+     * A pause met a gate that is already paused, by another bootstrap or an
+     * abandoned one (EloqDoc docs/cdc-change-stream.md §6.2). Not retriable:
+     * the operator decides whether to resume it.
+     */
+    CLUSTER_GATE_HELD,
 };
 
 static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
@@ -225,6 +232,8 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::INVALID_CURSOR, "ERR invalid cursor"},
     {TxErrorCode::CLUSTER_GATED,
      "Schema changes are paused by the cluster gate; retry after it resumes."},
+    {TxErrorCode::CLUSTER_GATE_HELD,
+     "The cluster gate is already paused; resume it before pausing again."},
 };
 
 static inline const std::string &TxErrorMessage(TxErrorCode err_code)

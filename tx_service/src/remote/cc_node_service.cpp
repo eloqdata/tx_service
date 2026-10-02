@@ -1203,8 +1203,7 @@ void CcNodeService::GenerateSkFromPk(
             LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
             std::unique_ptr<SkGenerator> sk_generator = nullptr;
             {
-                std::lock_guard<std::mutex> lk(
-                    cc_shards->table_index_op_pool_mux_);
+                std::lock_guard<std::mutex> lk(cc_shards->op_pool_mux_);
                 if (cc_shards->sk_generator_pool_.empty())
                 {
                     sk_generator = std::make_unique<SkGenerator>();
@@ -1270,8 +1269,7 @@ void CcNodeService::GenerateSkFromPk(
 
             // recycle skgenerator
             {
-                std::lock_guard<std::mutex> lk(
-                    cc_shards->table_index_op_pool_mux_);
+                std::lock_guard<std::mutex> lk(cc_shards->op_pool_mux_);
                 cc_shards->sk_generator_pool_.emplace_back(
                     std::move(sk_generator));
             }

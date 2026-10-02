@@ -979,9 +979,10 @@ void UpsertTableOp::Finish(TransactionExecution *txm)
 
     catalog_rec_.Reset();
     LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-    std::unique_lock<std::mutex> lk(shards->table_schema_op_pool_mux_);
+    std::unique_lock<std::mutex> lk(shards->op_pool_mux_);
     // Moves this op into the pool: nothing may touch it afterwards.
-    shards->table_schema_op_pool_.emplace_back(std::move(txm->schema_op_));
+    shards->table_schema_op_pool_.emplace_back(
+        std::move(txm->CompositeOpSlot<UpsertTableOp>()));
 }
 
 void UpsertTableOp::Reset(const std::string_view table_name_str,

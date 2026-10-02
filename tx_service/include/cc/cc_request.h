@@ -4722,6 +4722,7 @@ public:
         range_splitting_ = range_splitting;
         local_on_fly_cnt_ = nullptr;
         is_lock_recovery_ = is_lock_recovery;
+        is_cluster_gate_ = false;
         upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
         parse_cc_ = parse_cc;
         split_ranges_ = nullptr;
@@ -4970,6 +4971,27 @@ public:
         return is_lock_recovery_;
     }
 
+    /**
+     * @brief Marks the request as the replay of a cluster gate slot, whose
+     * blob is a ClusterGateLogMessage, rather than of a cluster scale log.
+     *
+     * Call after Reset(), which clears the mark.
+     */
+    void SetClusterGate()
+    {
+        is_cluster_gate_ = true;
+    }
+
+    /**
+     * @brief Whether the request replays a cluster gate slot.
+     *
+     * @return true for a cluster gate slot, false for any other log.
+     */
+    bool IsClusterGate() const
+    {
+        return is_cluster_gate_;
+    }
+
     std::pair<bool, CcErrorCode> &UpsertKvErrCode()
     {
         return upsert_kv_err_code_;
@@ -4995,6 +5017,7 @@ private:
     std::atomic_uint32_t *local_on_fly_cnt_{nullptr};
     bool *recovery_error_;
     bool is_lock_recovery_;
+    bool is_cluster_gate_{false};  ///< See SetClusterGate().
     uint16_t first_core_;
     uint16_t next_core_{UINT16_MAX};
     const struct TableSchema *table_schema_{nullptr};

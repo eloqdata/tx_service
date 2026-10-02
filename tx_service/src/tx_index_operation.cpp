@@ -1502,10 +1502,9 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             assert(txm->state_stack_.empty());
             LocalCcShards *local_cc_shards =
                 Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                local_cc_shards->table_index_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(local_cc_shards->op_pool_mux_);
             local_cc_shards->table_index_op_pool_.emplace_back(
-                std::move(txm->index_op_));
+                std::move(txm->CompositeOpSlot<UpsertTableIndexOp>()));
         }
         else
         {
@@ -1562,13 +1561,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
-            txm->index_op_->catalog_rec_.Reset();
+            txm->CompositeOpSlot<UpsertTableIndexOp>()->catalog_rec_.Reset();
             LocalCcShards *local_cc_shards =
                 Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                local_cc_shards->table_index_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(local_cc_shards->op_pool_mux_);
             local_cc_shards->table_index_op_pool_.emplace_back(
-                std::move(txm->index_op_));
+                std::move(txm->CompositeOpSlot<UpsertTableIndexOp>()));
         }
     }
     else
@@ -2443,8 +2441,7 @@ void UpsertTableIndexOp::HandleRangeTask(
                     Sharder::Instance().GetLocalCcShards();
                 std::unique_ptr<SkGenerator> sk_generator = nullptr;
                 {
-                    std::lock_guard<std::mutex> lk(
-                        cc_shards->table_index_op_pool_mux_);
+                    std::lock_guard<std::mutex> lk(cc_shards->op_pool_mux_);
                     if (cc_shards->sk_generator_pool_.empty())
                     {
                         sk_generator = std::make_unique<SkGenerator>();
@@ -2481,8 +2478,7 @@ void UpsertTableIndexOp::HandleRangeTask(
 
                     // recycle skgenerator
                     {
-                        std::lock_guard<std::mutex> lk(
-                            cc_shards->table_index_op_pool_mux_);
+                        std::lock_guard<std::mutex> lk(cc_shards->op_pool_mux_);
                         cc_shards->sk_generator_pool_.emplace_back(
                             std::move(sk_generator));
                     }
@@ -2606,8 +2602,7 @@ void UpsertTableIndexOp::HandleRangeTask(
 
                 // recycle skgenerator
                 {
-                    std::lock_guard<std::mutex> lk(
-                        cc_shards->table_index_op_pool_mux_);
+                    std::lock_guard<std::mutex> lk(cc_shards->op_pool_mux_);
                     cc_shards->sk_generator_pool_.emplace_back(
                         std::move(sk_generator));
                 }
