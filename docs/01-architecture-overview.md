@@ -48,7 +48,7 @@ Key design decisions:
 2. **`DataSubstrate::RegisterEngine(engine_type, catalog_factory, system_handler, prebuilt_tables, engine_metrics, publish_func)`** — called by each API engine between Init and Start. Engine slots are indexed by `TableEngine` (EloqSql=1, EloqKv=2, EloqDoc=3). For converged binaries, `EnableEngine` + `WaitForEnabledEnginesRegistered` let the loader block until all expected engines registered.
 3. **`DataSubstrate::Start()`** — ordered phases:
    1. `InitializeLogService` (`core/src/log_init.cpp`): when `WITH_LOG_SERVICE`, starts an in-process `txlog::LogServer` on `tx_port + 2` ([10-log-service.md](10-log-service.md)).
-   2. `InitializeMetrics` (`core/src/metrics_init.cpp`).
+   2. `InitializeMetrics` (`core/src/metrics_init.cpp`); then, with log service metrics on, `LogServer::EnableMetrics`, since the log server started before the registry existed.
    3. `InitializeStorageHandler` (`core/src/storage_init.cpp`) if `enable_data_store`: instantiates the backend selected by `WITH_DATA_STORE`, possibly starting an in-process `DataStoreService` ([09-store-handler.md](09-store-handler.md)).
    4. `InitializeTxService` (`core/src/tx_service_init.cpp`): builds `TxService` → which constructs `LocalCcShards` (all shards) + `Checkpointer`, then `TxService::Start()` boots `SnapshotManager`, `Sharder` (incl. host manager fork), `TxStartTsCollector` (MVCC), `DeadLockCheck`, one `tx_proc_N` thread per core, registers the `TxServiceModule` into brpc (`ELOQ_MODULE_ENABLED`), and connects cc stream sender/receiver.
 

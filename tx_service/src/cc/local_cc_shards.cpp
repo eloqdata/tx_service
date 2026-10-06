@@ -304,6 +304,8 @@ LocalCcShards::LocalCcShards(
         // (Sharder::LocalNodeGroups, plus the native ng on a standby), which
         // is the same membership these labels are built from.
         auto ckpt_stall_metric_labels = leader_changes_metric_labels;
+        // The cluster config map of every node group this node may lead.
+        auto gate_paused_metric_labels = leader_changes_metric_labels;
         node_meter_->Register(metrics::NAME_LEADER_CHANGES,
                               metrics::Type::Counter,
                               std::move(leader_changes_metric_labels));
@@ -313,6 +315,9 @@ LocalCcShards::LocalCcShards(
         node_meter_->Register(metrics::NAME_CHECKPOINT_STALL_ROUNDS,
                               metrics::Type::Gauge,
                               std::move(ckpt_stall_metric_labels));
+        node_meter_->Register(metrics::NAME_CLUSTER_GATE_PAUSED,
+                              metrics::Type::Gauge,
+                              std::move(gate_paused_metric_labels));
     }
 }
 

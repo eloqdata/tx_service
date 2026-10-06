@@ -118,6 +118,21 @@ public:
     /** @return The number of parked requests. */
     size_t Size() const;
 
+    /**
+     * @brief Called with the number of parked requests each time it changes,
+     * under the poll's lock, so it must be quick and must not call back into
+     * the poll.
+     */
+    using SizeObserver = std::function<void(size_t)>;
+
+    /**
+     * @brief Sets the observer of the parked count, replacing any earlier one,
+     * and reports the current count to it.
+     *
+     * @param observer The observer; empty to stop observing.
+     */
+    void SetSizeObserver(SizeObserver observer);
+
 private:
     /** @brief A deadline timer's argument; keeps its request alive. */
     struct TimerArg
@@ -162,6 +177,7 @@ private:
                                 ///< request's list and timer fields.
     std::list<std::shared_ptr<Request>> parked_;  ///< The parked requests.
     bool stopped_{false};  ///< Set by the destructor: parks complete at once.
+    SizeObserver size_observer_;  ///< See SetSizeObserver(); under mutex_.
     /**
      * @brief Prepared requests whose completion has not returned, plus
      * deadline timers that may still run; the destructor waits for zero.

@@ -28,6 +28,7 @@
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_service.h"
+#include "tx_service_metrics.h"
 
 namespace txservice
 {
@@ -293,6 +294,7 @@ public:
                 // in this payload for an asynchronous Sharder update.
                 neg_inf_.payload_.cur_payload_->SetClusterGate(
                     *config_rec->GetClusterGate());
+                ReportClusterGate(config_rec->GetClusterGate()->paused);
             }
             neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
                                               RecordStatus::Normal);
@@ -561,6 +563,28 @@ public:
 
 private:
     /**
+     * @brief Exports cluster_gate_paused for this map's node group: the value
+     * the map now holds. The node's leader stop resets it to 0, since the map
+     * is dropped then.
+     *
+     * @param paused Whether the gate the map holds is paused.
+     */
+    void ReportClusterGate(bool paused) const
+    {
+        if (!metrics::enable_metrics)
+        {
+            return;
+        }
+        metrics::Meter *meter = shard_->local_shards_.GetNodeMeter();
+        if (meter != nullptr)
+        {
+            meter->Collect(metrics::NAME_CLUSTER_GATE_PAUSED,
+                           paused ? 1.0 : 0.0,
+                           std::to_string(cc_ng_id_));
+        }
+    }
+
+    /**
      * @brief Replays log group 0's cluster gate slot (EloqDoc
      * docs/cdc-change-stream.md §6.2): installs the slot's value, however old
      * it is, so that a recovered node group enforces the same gate as the
@@ -608,6 +632,7 @@ private:
                         : ClusterGate::Mode::kDdl;
         gate.paused = gate_msg.paused();
         neg_inf_.payload_.cur_payload_->SetClusterGate(gate);
+        ReportClusterGate(gate.paused);
         if (req.CommitTs() > neg_inf_.CommitTs())
         {
             neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),

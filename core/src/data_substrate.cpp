@@ -34,6 +34,9 @@
 // clang-format on
 #include "data_substrate.h"
 #include "log_server.h"
+#if (WITH_LOG_SERVICE)
+#include "log_service_metrics.h"
+#endif
 #include "sequences/sequences.h"
 #include "store/data_store_handler.h"
 #include "util.h"
@@ -181,6 +184,16 @@ bool DataSubstrate::Start()
         LOG(ERROR) << "Failed to initialize metrics";
         return false;
     }
+#if (WITH_LOG_SERVICE)
+    // The log service started in phase 1, before the registry existed.
+    if (metrics::enable_metrics && metrics::enable_log_service_metrics &&
+        instance.log_server_ != nullptr)
+    {
+        instance.log_server_->EnableMetrics(
+            instance.metrics_registry_.get(),
+            instance.tx_service_common_labels_);
+    }
+#endif
 
     // Phase 3: Initialize storage handler
     if (instance.GetCoreConfig().enable_data_store &&

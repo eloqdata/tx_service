@@ -71,6 +71,14 @@ inline const metrics::Name NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES{
 inline const metrics::Name NAME_CHECKPOINT_STALL_ROUNDS{
     "checkpoint_stall_rounds"};
 
+/**
+ * 1 while this node's cluster config map of a node group holds a paused
+ * cluster gate (EloqDoc docs/cdc-change-stream.md §6.2), else 0; 0 once the
+ * node stops leading the group, which drops the map. Its maximum over the
+ * cluster is what a gate-age alert watches: no pause ends on its own.
+ */
+inline const metrics::Name NAME_CLUSTER_GATE_PAUSED{"cluster_gate_paused"};
+
 inline const metrics::Name NAME_LEADER_CHANGES{"leader_changes_seen_total"};
 inline const metrics::Name NAME_IS_LEADER{"is_leader"};
 

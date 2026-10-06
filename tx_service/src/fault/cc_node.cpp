@@ -523,6 +523,16 @@ bool CcNode::OnLeaderStop(int64_t term)
         pinning_threads_cv_.wait(lk, [this] { return pinning_threads_ == 0; });
     }
     ClearCcNodeGroupData();
+    if (metrics::enable_metrics)
+    {
+        // Stepping down drops the node group's cluster config map, and the
+        // gate it held with it; the next leader's replay reinstalls it. Only
+        // now: a gate install or replay queued before the clear ran before
+        // it on core 0 and may have reported 1, and none can report later,
+        // since a map made afresh holds no gate tx's lock.
+        Sharder::Instance().GetLocalCcShards()->GetNodeMeter()->Collect(
+            metrics::NAME_CLUSTER_GATE_PAUSED, 0, std::to_string(ng_id_));
+    }
     return true;
 }
 

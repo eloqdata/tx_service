@@ -80,6 +80,8 @@ Writes go through braft: `WriteLog` → serialize request to IOBuf → bind to `
 | `UpdateLogGroupLeader` | log server (on leader start) | Updates the tx node's `LogAgent` leader cache via `Sharder::UpdateLogGroupLeader` |
 | `NotifyCheckpointer` | log server (when replay-log size exceeds `notify_checkpointer_threshold_size`) | Kicks the checkpointer |
 
+**Metrics.** With `enable_metrics` and `enable_log_service_metrics` (ini `[metrics]`; the latter defaults to on when the WAL is enabled), every log group exports two gauges, labelled with the node's labels and `lg_id` (names in `log_service_metrics.h`): `cdc_arrival_complete_ts`, the group's arrival-complete timestamp in microseconds (the timestamp `CdcScan` emits up to), set on each replica when it advances, when a snapshot is loaded, and once when metrics are enabled; and `cdc_scan_parked_requests`, the `CdcScan` requests parked on the leader waiting for it to advance. The metrics registry is made after the log server, in phase 2 of `DataSubstrate::Start`, which then calls `LogServer::EnableMetrics`; `LogServiceImpl` keeps the registry, so groups a later `AttachLog` adds export the gauges too. A standalone log service exports none.
+
 ## 5. What is stored per log record
 
 A `WriteLogRequest` (`log.proto`) carries: `txn_number`, `commit_timestamp`, `log_content` (oneof: `data_log` / `schema_log` / `split_range_log` / `cluster_scale_log` / `migration_log` / `cluster_gate_log`), per-ng terms (`node_terms`), `tx_term`, `retry`, `log_group_id`. `DataLogMessage.node_txn_logs` is a map `cc_ng_id → opaque blob` — the blob is the tx's serialized writes for that ng.
@@ -196,13 +198,15 @@ eloq_log_service/src/log_server.cpp
 eloq_log_service/src/log_state_rocksdb_impl.cpp
 eloq_log_service/src/log_state_rocksdb_cloud_impl.cpp
 eloq_log_service/src/log_state_memory_impl.cpp
+eloq_log_service/src/cdc_long_poll.cpp
+eloq_log_service/src/cdc_scan.cpp
 eloq_log_service/src/fault_inject.cpp
-eloq_log_service/src/INIReader.cpp
-eloq_log_service/src/ini.c
+third_party/ini/INIReader.cpp
+third_party/ini/ini.c
 tx_service/tx-log-protos/log.pb.cc
 ```
 
-Include directories exported: `eloq_log_service/include/` and `tx_service/tx-log-protos/`. Links: brpc, braft, protobuf, gflags, glog, leveldb, rocksdb (or rocksdb-cloud), pthread. Compile-time log-state macros: `LOG_STATE_TYPE_MEM` (MEMORY), `LOG_STATE_TYPE_RKDB` + `LOG_STATE_TYPE_RKDB_ALL` (ROCKSDB), `LOG_STATE_TYPE_RKDB_S3` + `LOG_STATE_TYPE_RKDB_ALL` + `LOG_STATE_TYPE_RKDB_CLOUD` + `USE_AWS` (ROCKSDB_CLOUD_S3), `LOG_STATE_TYPE_RKDB_GCS` + … + `USE_GCP` (ROCKSDB_CLOUD_GCS). `LOG_SHIPPING_THREADS_NUM` is set to 1 for RocksDB-backed variants (a single scanner is sufficient because the iterator partitions the key range internally).
+Include directories exported: `eloq_log_service/include/`, `tx_service/tx-log-protos/`, and `eloq_metrics/include/` for the header-only `Meter` the log groups' metrics use (the metrics library itself is not linked; the process passes its registry in). The standalone project, `eloq_log_service/CMakeLists.txt`, which CI configures directly, exports the same directories. Links: brpc, braft, protobuf, gflags, glog, leveldb, rocksdb (or rocksdb-cloud), pthread. Compile-time log-state macros: `LOG_STATE_TYPE_MEM` (MEMORY), `LOG_STATE_TYPE_RKDB` + `LOG_STATE_TYPE_RKDB_ALL` (ROCKSDB), `LOG_STATE_TYPE_RKDB_S3` + `LOG_STATE_TYPE_RKDB_ALL` + `LOG_STATE_TYPE_RKDB_CLOUD` + `USE_AWS` (ROCKSDB_CLOUD_S3), `LOG_STATE_TYPE_RKDB_GCS` + … + `USE_GCP` (ROCKSDB_CLOUD_GCS). `LOG_SHIPPING_THREADS_NUM` is set to 1 for RocksDB-backed variants (a single scanner is sufficient because the iterator partitions the key range internally).
 
 ## 12. Gotchas and invariants
 
