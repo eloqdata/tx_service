@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -180,6 +181,63 @@ TEST_CASE("Racing sources complete every scan exactly once", "[cdc_long_poll]")
     }
     CHECK(more_than_once == 0);
     CHECK(poll.Size() == 0);
+}
+
+TEST_CASE("The size observer sees every change of the parked count",
+          "[cdc_long_poll]")
+{
+    CdcLongPoll poll;
+    std::vector<size_t> seen;  // Written under the poll's lock.
+    std::mutex seen_mutex;
+    auto snapshot = [&]
+    {
+        std::lock_guard<std::mutex> lk(seen_mutex);
+        return seen;
+    };
+    poll.SetSizeObserver(
+        [&](size_t parked)
+        {
+            std::lock_guard<std::mutex> lk(seen_mutex);
+            seen.push_back(parked);
+        });
+    // Setting the observer reports the count at once.
+    CHECK(snapshot() == std::vector<size_t>{0});
+
+    Outcome first, second, cancelled;
+    auto a = poll.Prepare(Recorder(first));
+    auto b = poll.Prepare(Recorder(second));
+    auto c = poll.Prepare(Recorder(cancelled));
+    poll.Park(a, 60'000);
+    poll.Park(b, 60'000);
+    poll.Park(c, 60'000);
+    CHECK(snapshot() == std::vector<size_t>{0, 1, 2, 3});
+
+    CdcLongPoll::Cancel(c);
+    REQUIRE(WaitFor([&] { return cancelled.runs.load() == 1; }));
+    CHECK(snapshot().back() == 2);
+
+    poll.CompleteAll(Wake::kAdvance);
+    REQUIRE(WaitFor([&]
+                    { return first.runs.load() == 1 && second.runs.load() == 1; }));
+    CHECK(snapshot() == std::vector<size_t>{0, 1, 2, 3, 2, 1, 0});
+
+    // A request completed before it is parked never counts.
+    Outcome early;
+    auto d = poll.Prepare(Recorder(early));
+    CdcLongPoll::Cancel(d);
+    poll.Park(d, 60'000);
+    REQUIRE(WaitFor([&] { return early.runs.load() == 1; }));
+    CHECK(snapshot().size() == 7);
+
+    // Clearing the observer stops the reports.
+    poll.SetSizeObserver(nullptr);
+    Outcome late;
+    auto e = poll.Prepare(Recorder(late));
+    poll.Park(e, 60'000);
+    CHECK(snapshot().size() == 7);
+    // Completed here, while 'late' is alive; the poll outlives it.
+    poll.CompleteAll(Wake::kStop);
+    REQUIRE(WaitFor([&] { return late.runs.load() == 1; }));
 }
 
 TEST_CASE("The poll completes its scans with kStop and waits for them",

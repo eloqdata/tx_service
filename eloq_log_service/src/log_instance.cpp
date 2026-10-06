@@ -13,6 +13,7 @@
 
 #include "closure.h"
 #include "log_service.h"
+#include "log_service_metrics.h"
 
 DEFINE_uint32(cdc_scan_max_parked,
               1024,
@@ -368,6 +369,47 @@ void LogInstance::CheckMigrationIsFinished(
     bool all_finished =
         log_state_->CheckAllMigrationIsFinished(request->cluster_scale_txn());
     response->set_finished(all_finished);
+}
+
+void LogInstance::EnableMetrics(metrics::MetricsRegistry *registry,
+                                const metrics::CommonLabels &node_labels)
+{
+    if (meter_ != nullptr)
+    {
+        return;
+    }
+    metrics::CommonLabels labels = node_labels;
+    labels["lg_id"] = std::to_string(log_group_id_);
+    auto meter = std::make_unique<metrics::Meter>(registry, labels);
+    meter->Register(metrics::NAME_CDC_ARRIVAL_COMPLETE_TS,
+                    metrics::Type::Gauge);
+    meter->Register(metrics::NAME_CDC_SCAN_PARKED_REQUESTS,
+                    metrics::Type::Gauge);
+    metrics::Meter *published = meter.get();
+    meter_ = std::move(meter);
+    published_meter_.store(published, std::memory_order_release);
+    // The group has been serving since before metrics existed: report where
+    // arrival_complete_ts already is, rather than 0 until its next advance.
+    ReportArrivalComplete();
+    cdc_long_poll_.SetSizeObserver(
+        [published](size_t parked)
+        {
+            published->Collect(metrics::NAME_CDC_SCAN_PARKED_REQUESTS,
+                               static_cast<double>(parked));
+        });
+}
+
+void LogInstance::ReportArrivalComplete()
+{
+    std::lock_guard<std::mutex> lk(arrival_metric_mutex_);
+    if (metrics::Meter *meter =
+            published_meter_.load(std::memory_order_acquire))
+    {
+        meter->Collect(
+            metrics::NAME_CDC_ARRIVAL_COMPLETE_TS,
+            static_cast<double>(
+                arrival_complete_ts_.load(std::memory_order_acquire)));
+    }
 }
 
 void LogInstance::CdcScan(brpc::Controller *cntl,
@@ -1150,9 +1192,13 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
             log_state_->UpdateCkptTs(node_group, timestamp);
             // Only this advance can make a record emittable, so it completes
             // the parked long polls, which then scan again.
-            if (log_state_->MinCkptTs() > arrival_complete_ts)
+            const uint64_t advanced_to = log_state_->MinCkptTs();
+            if (advanced_to > arrival_complete_ts)
             {
                 cdc_long_poll_.CompleteAll(CdcLongPoll::Wake::kAdvance);
+                arrival_complete_ts_.store(advanced_to,
+                                           std::memory_order_release);
+                ReportArrivalComplete();
             }
         }
         if (response)

@@ -72,6 +72,10 @@ void CdcLongPoll::Park(const std::shared_ptr<Request> &request,
         {
             request->position = parked_.insert(parked_.end(), request);
             request->parked = true;
+            if (size_observer_)
+            {
+                size_observer_(parked_.size());
+            }
             auto *arg = new TimerArg{this, request};
             // The callback may run at once, on the timer thread; it waits for
             // this lock before it touches the request.
@@ -139,6 +143,16 @@ size_t CdcLongPoll::Size() const
     return parked_.size();
 }
 
+void CdcLongPoll::SetSizeObserver(SizeObserver observer)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    size_observer_ = std::move(observer);
+    if (size_observer_)
+    {
+        size_observer_(parked_.size());
+    }
+}
+
 void CdcLongPoll::OnDeadline(void *arg)
 {
     auto *timer_arg = static_cast<TimerArg *>(arg);
@@ -169,6 +183,10 @@ void CdcLongPoll::Finish(const std::shared_ptr<Request> &request, Wake why)
         {
             parked_.erase(request->position);
             request->parked = false;
+            if (size_observer_)
+            {
+                size_observer_(parked_.size());
+            }
         }
         if (request->has_timer)
         {

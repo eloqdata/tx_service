@@ -26,6 +26,8 @@
 
 #include "cdc_long_poll.h"
 #include "log.pb.h"
+#include "meter.h"
+#include "metrics.h"
 #include "log_shipping_agent.h"
 #include "log_state.h"
 
@@ -353,6 +355,21 @@ public:
                  CdcScanResponse *response,
                  google::protobuf::Closure *done);
 
+    /**
+     * @brief Starts exporting the group's change data capture metrics:
+     * cdc_arrival_complete_ts and cdc_scan_parked_requests
+     * (log_service_metrics.h), labelled with the node's labels and lg_id.
+     *
+     * Called once, after the group has started serving: the metrics registry
+     * is made after the log service. The meter is complete before it is
+     * published, so a thread that sees it can use it.
+     *
+     * @param registry The process's metrics registry; outlives this instance.
+     * @param node_labels The node's common labels.
+     */
+    void EnableMetrics(metrics::MetricsRegistry *registry,
+                       const metrics::CommonLabels &node_labels);
+
     void TransferLeader(const TransferRequest *request,
                         TransferResponse *response,
                         google::protobuf::Closure *done);
@@ -593,6 +610,9 @@ private:
         int read_snapshot_status =
             log_state_->ReadSnapshot(snapshot_path, files);
         LOG(INFO) << "finish loading snapshot";
+        arrival_complete_ts_.store(log_state_->MinCkptTs(),
+                                   std::memory_order_release);
+        ReportArrivalComplete();
         return read_snapshot_status;
     }
 
@@ -656,6 +676,32 @@ private:
     void ProposeTaskAndWait(braft::Task &task,
                             const LogRequest *request,
                             LogResponse *response);
+
+    /**
+     * @brief Sets cdc_arrival_complete_ts to arrival_complete_ts_, if the
+     * meter is published. Under arrival_metric_mutex_, so that
+     * EnableMetrics()'s first report and the apply thread's later ones
+     * cannot land out of order and leave the gauge behind the state.
+     */
+    void ReportArrivalComplete();
+
+    /**
+     * @brief The group's arrival_complete_ts as the apply thread last left
+     * it (LogState::MinCkptTs()), for EnableMetrics(), which runs on another
+     * thread and cannot read the log state.
+     */
+    std::atomic<uint64_t> arrival_complete_ts_{0};
+    /** @brief Serializes ReportArrivalComplete(). */
+    std::mutex arrival_metric_mutex_;
+
+    /** @brief Owns the meter EnableMetrics() makes; kept until destruction. */
+    std::unique_ptr<metrics::Meter> meter_;
+    /**
+     * @brief The meter once it is complete, else nullptr; what other threads
+     * read. Declared before cdc_long_poll_, whose size observer uses it, so it
+     * outlives the poll.
+     */
+    std::atomic<metrics::Meter *> published_meter_{nullptr};
 
     /**
      * @brief The parked long-poll CdcScan requests. Declared last so that it

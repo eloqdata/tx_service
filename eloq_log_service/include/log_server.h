@@ -80,6 +80,20 @@ public:
 
     int Start(bool enable_brpc_builtin_services = true);
 
+    /**
+     * @brief Starts exporting the log groups' change data capture metrics. The
+     * metrics registry is made after the log server, so this is called once
+     * both exist.
+     *
+     * @param registry The process's metrics registry; outlives the server.
+     * @param node_labels The node's common labels.
+     */
+    void EnableMetrics(metrics::MetricsRegistry *registry,
+                       const metrics::CommonLabels &node_labels)
+    {
+        raft_log_service_.EnableMetrics(registry, node_labels);
+    }
+
     const std::string &GetStoragePath() const
     {
         return storage_path_;

@@ -12,6 +12,7 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -497,6 +498,9 @@ public:
 
 #endif
 
+        // Under replicas_mutex_, against EnableMetrics' walk of the map; the
+        // replicas get their metrics if they were enabled before the attach.
+        std::unique_lock<std::mutex> replicas_lk(replicas_mutex_);
         AddLogReplicas(node_id,
                        ip_list,
                        port_list,
@@ -527,6 +531,8 @@ public:
                        check_replay_log_size_interval_sec,
                        notify_checkpointer_threshold_size,
                        cdc_retention_seconds);
+        EnableReplicaMetricsLocked();
+        replicas_lk.unlock();
 
         assert(service_status_ == Status::DETACHED);
 
@@ -535,7 +541,10 @@ public:
         if (err != 0)
         {
             LOG(ERROR) << "Attach log service: fail to start raft node";
-            log_replicas_.clear();
+            {
+                std::lock_guard<std::mutex> lk(replicas_mutex_);
+                log_replicas_.clear();
+            }
             service_status_.store(Status::DETACHED, std::memory_order_release);
             response->set_err_code(
                 ::txlog::AttachLogErrorCode::INSTANCE_INIT_ERROR);
@@ -596,7 +605,10 @@ public:
             instance.shutdown();
             instance.join();
         }
-        log_replicas_.clear();
+        {
+            std::lock_guard<std::mutex> lk(replicas_mutex_);
+            log_replicas_.clear();
+        }
 
         service_status_.store(Status::DETACHED, std::memory_order_release);
         LOG(INFO) << "Detach log service: service is detached";
@@ -976,8 +988,54 @@ public:
         }
     }
 
+    /**
+     * @brief Starts exporting every log group's change data capture metrics
+     * (LogInstance::EnableMetrics), for the groups present now and for those
+     * a later AttachLog adds.
+     *
+     * @param registry The process's metrics registry.
+     * @param node_labels The node's common labels.
+     */
+    void EnableMetrics(metrics::MetricsRegistry *registry,
+                       const metrics::CommonLabels &node_labels)
+    {
+        std::lock_guard<std::mutex> lk(replicas_mutex_);
+        metrics_registry_ = registry;
+        metrics_labels_ = node_labels;
+        EnableReplicaMetricsLocked();
+    }
+
 private:
+    /**
+     * @brief Enables the metrics of every replica that has none, once
+     * EnableMetrics() has been called; LogInstance::EnableMetrics ignores a
+     * replica already enabled. Called with replicas_mutex_ held.
+     */
+    void EnableReplicaMetricsLocked()
+    {
+        if (metrics_registry_ == nullptr)
+        {
+            return;
+        }
+        for (auto &logger_pair : log_replicas_)
+        {
+            logger_pair.second.EnableMetrics(metrics_registry_,
+                                             metrics_labels_);
+        }
+    }
+
     std::atomic<Status> service_status_{Status::ATTACHED};
+
+    /**
+     * @brief Guards log_replicas_ insertions and clears (AttachLog, DetachLog)
+     * against EnableMetrics' walk of it, and metrics_registry_ and
+     * metrics_labels_.
+     */
+    std::mutex replicas_mutex_;
+    /** @brief Set by EnableMetrics(); nullptr while metrics are off. */
+    metrics::MetricsRegistry *metrics_registry_{nullptr};
+    /** @brief The node's common labels EnableMetrics() was given. */
+    metrics::CommonLabels metrics_labels_;
 
     // raft log nodes (no matter leader or followers) which belong to this
     // raft service.

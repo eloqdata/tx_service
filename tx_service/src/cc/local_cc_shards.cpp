@@ -320,6 +320,8 @@ LocalCcShards::LocalCcShards(
         leader_changes_metric_labels.emplace_back(
             "ng_id", std::move(ng_id_label_values));
         auto is_leader_metric_labels = leader_changes_metric_labels;
+        // The cluster config map of every node group this node may lead.
+        auto gate_paused_metric_labels = leader_changes_metric_labels;
         node_meter_->Register(metrics::NAME_LEADER_CHANGES,
                               metrics::Type::Counter,
                               std::move(leader_changes_metric_labels));
@@ -344,6 +346,9 @@ LocalCcShards::LocalCcShards(
                                  "persist",
                                  "metadata",
                                  "unknown"}}});
+        node_meter_->Register(metrics::NAME_CLUSTER_GATE_PAUSED,
+                              metrics::Type::Gauge,
+                              std::move(gate_paused_metric_labels));
     }
 }
 

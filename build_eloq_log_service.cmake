@@ -290,6 +290,9 @@ ADD_LIBRARY(logservice
     )
 
 target_include_directories(logservice PUBLIC ${LOG_INCLUDE_DIR})
+# The log groups' metrics use eloq_metrics' header-only Meter against the
+# registry the process passes in, so the library itself is not linked.
+target_include_directories(logservice PUBLIC ${ELOQ_METRICS_INCLUDE_DIR})
 if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
     target_include_directories(logservice PUBLIC ${ROCKSDB_INCLUDE_PATH})
 endif()

@@ -334,6 +334,9 @@ add_library(logservice STATIC
 
 target_compile_definitions(logservice PUBLIC LOG_SHIPPING_THREADS_NUM=${LOG_SHIPPING_THREADS_NUM})
 list(APPEND LOG_INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini)
+# The log groups' metrics use eloq_metrics' header-only Meter against the
+# registry the process passes in, so the library itself is not linked.
+list(APPEND LOG_INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/../eloq_metrics/include)
 target_include_directories(logservice PUBLIC ${LOG_INCLUDE_DIR})
 
 target_link_libraries(logservice PUBLIC ${LOG_LIB})
