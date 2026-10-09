@@ -674,11 +674,13 @@ struct DsUpsertTableOp : public TransactionOperation
     CcHandlerResult<Void> hd_result_;
     txservice::AlterTableInfo *alter_table_info_{nullptr};
 
-    // write_time_ is corresponding to kv-storage's write_time. Generally,
-    // write_time_ is assigned to commit_ts and commit_ts is regarded as new
-    // schema version. But for rollback create-index, write_time_ is assigned to
-    // `max(commit_ts, latest commit_ts_bound_) + 1` to overwrite catalog image
-    // in kv-storage.
+    /**
+     * The kv store's write time for the catalog image: the op's commit
+     * timestamp, which is the new schema version. A rolled-back add index
+     * writes its catalog image back at its commit-stage timestamp, above the
+     * prepare-stage one the image was first written at, so that the rollback
+     * overwrites it.
+     */
     uint64_t write_time_{0};
 };
 

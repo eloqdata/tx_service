@@ -84,7 +84,7 @@ One `CcShard` per core (`core_id_`, `core_cnt_`). Key state:
 | `cc_queue_`, `low_priority_cc_queue_`, `lazy_free_queue_`, `cc_wait_list_for_memory_` | the request queues described above (queue sizes tracked in relaxed atomics so `IsIdle()` is cheap). |
 | `tx_vec_` (`std::vector<TEntry>`) | per-shard transaction table. `NewTx()` scans circularly for a finished slot, grows ×1.5 when full. `TEntry` (`tentry.h`) holds `commit_ts_`, `lower_bound_` (start ts), `status_`, `ident_`, `term_`. TxNumber = `((ng_id << 10 \| core_id) << 32) \| ident` (`GlobalCoreId()`), so a tx number encodes its owning node group and core. |
 | `lock_vec_` (`std::vector<KeyGapLockAndExtraData::uptr>`) | pooled lock objects (initial size `LOCK_ARRAY_INIT_SIZE` = 8192, doubles when exhausted; `TryResizeLockArray()` shrinks it again when sparse). `NewLock()` hands one to an entry; empty locks are recycled back. |
-| `lock_holding_txs_` | `ng -> {TxNumber -> TxLockInfo}`: every lock/intent a tx holds in this shard (`cce_list_`), when it last acquired a write lock on any table (`wlock_ts_`, a lower bound on its commit timestamp), whether it holds a write lock that holds the checkpoint back (`holds_ckpt_wlock_`, see §10), and the tx coordinator term. Feeds `ActiveTxMinTs()` (checkpoint watermark), `ActiveTxMaxTs()` (standby subscription barrier), orphan-lock recovery (`CheckRecoverTx`), and deadlock collection (`CollectLockWaitingInfo`). |
+| `lock_holding_txs_` | `ng -> {TxNumber -> TxLockInfo}`: every lock/intent a tx holds in this shard (`cce_list_`), when it last acquired a write lock on any table (`wlock_ts_`; for DML a lower bound on its commit timestamp, §10), whether it holds a write lock that holds the checkpoint back (`holds_ckpt_wlock_`, see §10), and the tx coordinator term. Feeds `ActiveTxMinTs()` (checkpoint watermark), `ActiveTxMaxTs()` (standby subscription barrier), orphan-lock recovery (`CheckRecoverTx`), and deadlock collection (`CollectLockWaitingInfo`). |
 | `head_ccp_`/`tail_ccp_`, `protected_head_page_`, `clean_start_ccp_` | LRU double-linked list of `LruPage`s: `head — [small pages] — protected_head_ — [large pages] — tail` (large objects get exclusive pages; SLRU-style policies share the divider). `UpdateLruList`/`DetachLru` maintain it; `access_counter_` stamps relative page order. |
 | `shard_heap_`, `shard_data_sync_scan_heap_` | per-shard **mimalloc heaps** (`CcShardHeap`). `memory_limit_` = node limit × (1 − range-slice %) / core_cnt; the main heap gets 90 % of that, the data-sync-scan heap 0.1 × 0.25. `Full()`/`NeedCleanShard()`/`NeedDefragment()` gate admission, eviction, and `DefragShardHeapCc`. |
 | `last_read_ts_` | max read timestamp seen on this shard; write txs must commit above it (read-write coordination, see comment at the member). |
@@ -452,10 +452,12 @@ intents/locks as it materializes.
   - the committed-write recover window;
   - the checkpoint stall warning.
 
-  Schema operations choose their commit timestamp at prepare and rely only on the exclusive
-  section. Each writes one log under the catalog write lock: the prepare log for index ops,
-  the commit log for create, drop and truncate. Recovery resolves them by tx number, not by
-  this bound.
+  Schema operations rely only on the exclusive section. Index ops choose their commit timestamp
+  at prepare, under the write lock, and can commit below a later re-grant of it; create, drop
+  and truncate choose it again under their commit-stage write lock (`AssignCommitStageTs`),
+  above every DML that lock drained. Each writes one log under the catalog write lock: the
+  prepare log for index ops, the commit log for create, drop and truncate. Recovery resolves
+  them by tx number, not by this bound.
 
   `ActiveTxMinTs` returns `min(wlock_ts_ − 1)` and `ActiveTxMaxTs` `max(wlock_ts_)`, both over
   the entries with `holds_ckpt_wlock_`. A write lock sets that flag when
