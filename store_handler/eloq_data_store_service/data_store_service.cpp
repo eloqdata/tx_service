@@ -415,6 +415,7 @@ bool DataStoreService::StartService(bool create_db_if_missing)
                     }
                     ds_ref.shard_status_.store(open_mode,
                                                std::memory_order_release);
+                    RunStartingWaiters(shard_id);
                     LOG(INFO) << "Created data store on starting "
                                  "DataStoreService, shard id: "
                               << shard_id;
@@ -464,10 +465,12 @@ bool DataStoreService::StartService(bool create_db_if_missing)
     return true;
 }
 
-bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
-                                                DSShardStatus open_mode,
-                                                bool create_db_if_missing,
-                                                int64_t term)
+bool DataStoreService::ConnectAndStartDataStore(
+    uint32_t data_shard_id,
+    DSShardStatus open_mode,
+    bool create_db_if_missing,
+    int64_t term,
+    const std::unordered_set<uint16_t> *partition_buckets)
 {
     if (open_mode == DSShardStatus::Closed)
     {
@@ -505,35 +508,62 @@ bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
                << ", data_store_ is null:"
                << (shard_ref.data_store_ == nullptr);
     assert(data_store_factory_ != nullptr);
-    if (shard_ref.data_store_ == nullptr)
+    const bool created = shard_ref.data_store_ == nullptr;
+    if (created)
     {
+        // Created without starting it, so that the store has its buckets
+        // before it starts.
         shard_ref.data_store_ = data_store_factory_->CreateDataStore(
-            create_db_if_missing, data_shard_id, this, true, term);
+            create_db_if_missing, data_shard_id, this, false, term);
         if (shard_ref.data_store_ == nullptr)
         {
             LOG(ERROR) << "Failed to create data store";
+            // Not Starting forever: requests waiting meanwhile get the
+            // sharding error, and a later open can try again.
+            shard_ref.shard_status_.store(DSShardStatus::Closed,
+                                          std::memory_order_release);
+            RunStartingWaiters(data_shard_id);
             return false;
         }
     }
-    else
+    if (partition_buckets != nullptr)
     {
+        // The store is stopped: safe to change what its filter reads.
+        shard_ref.data_store_->SetPartitionBuckets(*partition_buckets);
+    }
+    if (!created)
+    {
+        // CreateDataStore initializes a new store; a kept one is initialized
+        // again after its close.
         bool res = shard_ref.data_store_->Initialize();
         if (!res)
         {
             LOG(ERROR) << "Failed to initialize data store";
+            shard_ref.shard_status_.store(DSShardStatus::Closed,
+                                          std::memory_order_release);
+            RunStartingWaiters(data_shard_id);
             return false;
         }
+    }
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-        res = shard_ref.data_store_->StartDB(term, data_shard_id);
+    bool started = shard_ref.data_store_->StartDB(term, data_shard_id);
 #else
-        res = shard_ref.data_store_->StartDB(term);
+    bool started = shard_ref.data_store_->StartDB(term);
 #endif
-        if (!res)
+    if (!started)
+    {
+        LOG(ERROR) << "Failed to start db instance in data store service";
+        if (created)
         {
-            LOG(ERROR) << "Failed to start db instance in data store service";
-            return false;
+            // As when CreateDataStore starts the store itself and fails: the
+            // next open creates a new one.
+            shard_ref.data_store_ = nullptr;
         }
+        shard_ref.shard_status_.store(DSShardStatus::Closed,
+                                      std::memory_order_release);
+        RunStartingWaiters(data_shard_id);
+        return false;
     }
 
     if (shard_ref.scan_iter_cache_ == nullptr)
@@ -554,10 +584,63 @@ bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
                                                 DSShardStatus::Closed);
     }
 
+    // Test only: keeps the shard Starting until the test removes the fault,
+    // so that requests meet the shard while it opens.
+    CODE_FAULT_INJECTOR("dss_hold_starting", {
+        LOG(INFO) << "FaultInject dss_hold_starting: holding DSS shard "
+                  << data_shard_id << " in Starting";
+        while (FaultInject::Entry("dss_hold_starting") != nullptr)
+        {
+            bthread_usleep(100000);
+        }
+        LOG(INFO) << "FaultInject dss_hold_starting: released DSS shard "
+                  << data_shard_id;
+    });
+
     expect_status = DSShardStatus::Starting;
     shard_ref.shard_status_.compare_exchange_strong(
         expect_status, open_mode, std::memory_order_release);
+    RunStartingWaiters(data_shard_id);
     return true;
+}
+
+void DataStoreService::WaitWhileStarting(uint32_t shard_id,
+                                         std::function<void()> retry)
+{
+    DataShard &ds_ref = data_shards_.at(shard_id);
+    {
+        std::lock_guard<std::mutex> lk(ds_ref.starting_waiters_mux_);
+        if (ds_ref.shard_status_.load(std::memory_order_seq_cst) ==
+            DSShardStatus::Starting)
+        {
+            ds_ref.starting_waiters_.push_back(std::move(retry));
+            DLOG(INFO) << "A request waits on DSS shard " << shard_id
+                       << " until it leaves Starting";
+            return;
+        }
+    }
+    // The shard left Starting since the handler looked.
+    retry();
+}
+
+void DataStoreService::RunStartingWaiters(uint32_t shard_id)
+{
+    DataShard &ds_ref = data_shards_.at(shard_id);
+    std::vector<std::function<void()>> waiters;
+    {
+        std::lock_guard<std::mutex> lk(ds_ref.starting_waiters_mux_);
+        waiters.swap(ds_ref.starting_waiters_);
+    }
+    if (waiters.empty())
+    {
+        return;
+    }
+    LOG(INFO) << "DSS shard " << shard_id << " left Starting; running again "
+              << waiters.size() << " requests that waited";
+    for (const std::function<void()> &retry : waiters)
+    {
+        retry();
+    }
 }
 
 void DataStoreService::Read(::google::protobuf::RpcController *controller,
@@ -581,6 +664,13 @@ void DataStoreService::Read(::google::protobuf::RpcController *controller,
     if (shard_status != DSShardStatus::ReadOnly &&
         shard_status != DSShardStatus::ReadWrite)
     {
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this, controller, request, response, done]()
+                              { Read(controller, request, response, done); });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         auto *result = response->mutable_result();
         result->set_error_code(::EloqDS::remote::DataStoreError::DB_NOT_OPEN);
@@ -620,6 +710,34 @@ void DataStoreService::Read(const std::string_view table_name,
     if (shard_status != DSShardStatus::ReadOnly &&
         shard_status != DSShardStatus::ReadWrite)
     {
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this,
+                               table_name,
+                               partition_id,
+                               shard_id,
+                               key,
+                               reopen,
+                               record,
+                               ts,
+                               ttl,
+                               result,
+                               done]()
+                              {
+                                  Read(table_name,
+                                       partition_id,
+                                       shard_id,
+                                       key,
+                                       reopen,
+                                       record,
+                                       ts,
+                                       ttl,
+                                       result,
+                                       done);
+                              });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         record->clear();
         *ts = 0;
@@ -666,6 +784,14 @@ void DataStoreService::FlushData(
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, controller, request, response, done]()
+                { FlushData(controller, request, response, done); });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         ::EloqDS::remote::CommonResult *result = response->mutable_result();
         if (shard_status == DSShardStatus::Closed)
@@ -820,6 +946,14 @@ void DataStoreService::FlushData(const std::vector<std::string> &kv_table_names,
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, &kv_table_names, shard_id, &result, done]()
+                { FlushData(kv_table_names, shard_id, result, done); });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         if (shard_status == DSShardStatus::Closed)
         {
@@ -866,6 +1000,14 @@ void DataStoreService::DeleteRange(
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, controller, request, response, done]()
+                { DeleteRange(controller, request, response, done); });
+            return;
+        }
         // This object helps to call done->Run() in RAII style. If you need to
         // process the request asynchronously, pass done_guard.release().
         brpc::ClosureGuard done_guard(done);
@@ -916,6 +1058,30 @@ void DataStoreService::DeleteRange(const std::string_view table_name,
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this,
+                               table_name,
+                               partition_id,
+                               shard_id,
+                               start_key,
+                               end_key,
+                               skip_wal,
+                               &result,
+                               done]()
+                              {
+                                  DeleteRange(table_name,
+                                              partition_id,
+                                              shard_id,
+                                              start_key,
+                                              end_key,
+                                              skip_wal,
+                                              result,
+                                              done);
+                              });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         if (shard_status == DSShardStatus::Closed)
         {
@@ -970,6 +1136,14 @@ void DataStoreService::CreateTable(
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, controller, request, response, done]()
+                { CreateTable(controller, request, response, done); });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         ::EloqDS::remote::CommonResult *result = response->mutable_result();
         if (shard_status == DSShardStatus::Closed)
@@ -1014,6 +1188,14 @@ void DataStoreService::CreateTable(const std::string_view table_name,
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, table_name, shard_id, &result, done]()
+                { CreateTable(table_name, shard_id, result, done); });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         if (shard_status == DSShardStatus::Closed)
         {
@@ -1060,6 +1242,14 @@ void DataStoreService::DropTable(
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, controller, request, response, done]()
+                { DropTable(controller, request, response, done); });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         ::EloqDS::remote::CommonResult *result = response->mutable_result();
         if (shard_status == DSShardStatus::Closed)
@@ -1104,6 +1294,14 @@ void DataStoreService::DropTable(const std::string_view table_name,
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this, table_name, shard_id, &result, done]() {
+                                  DropTable(table_name, shard_id, result, done);
+                              });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         if (shard_status == DSShardStatus::Closed)
         {
@@ -1151,6 +1349,14 @@ void DataStoreService::BatchWriteRecords(
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, controller, request, response, done]()
+                { BatchWriteRecords(controller, request, response, done); });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         auto *result = response->mutable_result();
         if (shard_status == DSShardStatus::Closed)
@@ -1208,6 +1414,44 @@ void DataStoreService::ScanNext(
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this,
+                               table_name,
+                               partition_id,
+                               shard_id,
+                               start_key,
+                               end_key,
+                               inclusive_start,
+                               inclusive_end,
+                               scan_forward,
+                               batch_size,
+                               search_conditions,
+                               items,
+                               session_id,
+                               generate_session_id,
+                               result,
+                               done]()
+                              {
+                                  ScanNext(table_name,
+                                           partition_id,
+                                           shard_id,
+                                           start_key,
+                                           end_key,
+                                           inclusive_start,
+                                           inclusive_end,
+                                           scan_forward,
+                                           batch_size,
+                                           search_conditions,
+                                           items,
+                                           session_id,
+                                           generate_session_id,
+                                           result,
+                                           done);
+                              });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         result->set_error_code(::EloqDS::remote::DataStoreError::DB_NOT_OPEN);
         result->set_error_msg("KV store not opened yet.");
@@ -1257,6 +1501,14 @@ void DataStoreService::ScanNext(::google::protobuf::RpcController *controller,
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this, controller, request, response, done]() {
+                                  ScanNext(controller, request, response, done);
+                              });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         auto *result = response->mutable_result();
         result->set_error_code(::EloqDS::remote::DataStoreError::DB_NOT_OPEN);
@@ -1292,6 +1544,14 @@ void DataStoreService::ScanClose(::google::protobuf::RpcController *controller,
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(
+                shard_id,
+                [this, controller, request, response, done]()
+                { ScanClose(controller, request, response, done); });
+            return;
+        }
         assert(false);
         brpc::ClosureGuard done_guard(done);
         auto *result = response->mutable_result();
@@ -1328,6 +1588,25 @@ void DataStoreService::ScanClose(const std::string_view table_name,
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this,
+                               table_name,
+                               partition_id,
+                               shard_id,
+                               session_id,
+                               result,
+                               done]() {
+                                  ScanClose(table_name,
+                                            partition_id,
+                                            shard_id,
+                                            session_id,
+                                            result,
+                                            done);
+                              });
+            return;
+        }
         assert(false);
         brpc::ClosureGuard done_guard(done);
         result->set_error_code(::EloqDS::remote::DataStoreError::DB_NOT_OPEN);
@@ -1449,6 +1728,40 @@ void DataStoreService::BatchWriteRecords(
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
+        if (shard_status == DSShardStatus::Starting)
+        {
+            WaitWhileStarting(shard_id,
+                              [this,
+                               table_name,
+                               partition_id,
+                               shard_id,
+                               &key_parts,
+                               &record_parts,
+                               &ts,
+                               &ttl,
+                               &op_types,
+                               skip_wal,
+                               &result,
+                               done,
+                               parts_cnt_per_key,
+                               parts_cnt_per_record]()
+                              {
+                                  BatchWriteRecords(table_name,
+                                                    partition_id,
+                                                    shard_id,
+                                                    key_parts,
+                                                    record_parts,
+                                                    ts,
+                                                    ttl,
+                                                    op_types,
+                                                    skip_wal,
+                                                    result,
+                                                    done,
+                                                    parts_cnt_per_key,
+                                                    parts_cnt_per_record);
+                              });
+            return;
+        }
         brpc::ClosureGuard done_guard(done);
         if (shard_status == DSShardStatus::Closed)
         {
@@ -2438,12 +2751,6 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
     DLOG(INFO) << "OpenDataStore begin for DSS shard " << shard_id << ", term "
                << term << ", bucket_count " << bucket_count << ", shard_status "
                << static_cast<int>(ds_ref.shard_status_.load());
-    if (data_store_factory_ != nullptr)
-    {
-        data_store_factory_->InitializePartitionFilter(shard_id,
-                                                       std::move(bucket_ids));
-    }
-
     auto start_time = std::chrono::steady_clock::now();
     if (ds_ref.shard_status_.load() != DSShardStatus::Closed)
     {
@@ -2462,8 +2769,10 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
 
     DSShardStatus open_mode = DSShardStatus::ReadWrite;
     bool create_db_if_missing = false;
+    // The node group's buckets, which the shard's store limits its sweeps to
+    // (DataStore::SetPartitionBuckets).
     auto res = ConnectAndStartDataStore(
-        shard_id, open_mode, create_db_if_missing, term);
+        shard_id, open_mode, create_db_if_missing, term, &bucket_ids);
     auto end_time = std::chrono::steady_clock::now();
     auto use_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                         end_time - start_time)
@@ -3254,6 +3563,7 @@ bool DataStoreService::SwitchReadOnlyToClosed(uint32_t shard_id)
             std::memory_order_seq_cst);
         CHECK(switched);
         cluster_manager_.SwitchShardToClosed(shard_id, DSShardStatus::ReadOnly);
+        RunStartingWaiters(shard_id);
     }
     return true;
 }

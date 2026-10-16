@@ -25,10 +25,12 @@
 
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
+#include "fault/fault_inject.h"
 #include "log.pb.h"
 #include "log_type.h"
 #include "proto/cc_request.pb.h"
@@ -42,15 +44,21 @@
  * and request leader transfer if not.
  *
  * Here is a brief replay protocol description:
- * 1. ccnode becomes a raft leader and begins to send ReplayLogRequest to all
- * the log groups. If log group's leader is not elected, the ccnode will call
- * braft API to wait for the log leader to be elected.
+ * 1. ccnode becomes a raft leader and, at the end of its leader start
+ * (CcNode::OnLeaderStart), sends ReplayLogRequest to all the log groups; it is
+ * the only node that asks. Each send is one bounded attempt (a leader lookup
+ * and an RPC with a deadline): a lost request, a log group with no leader and
+ * a lost reply look the same to the sender, so the proof that a log group got
+ * the request is the replay stream it opens. A log group that has neither
+ * finished the replay nor a replay stream kReplayCheckIntervalUs after the
+ * last send to it is asked again, at that interval, until it does.
  * 2. Log group will connect to log_replay_service and send replay logs to
  * ccnode.
  * 3. ccnode receives and replays the logs from the stream.
  * 4. If ccnode fails to receive new logs after a timeout(2000ms), it will close
  * the stream and send a new ReplayLogRequest to log group leader. And replay
- * from the beginning.
+ * from the beginning. A replay that fails on the ccnode closes its streams;
+ * the log groups still owing the replay are then asked again as in 1.
  * 5. ccnode finishes the log replay and become the actual leader from candidate
  * leader. Then it will close the log replay stream.
  * 6. Later when an orphan lock is detected, will send RecoveryTx request to log
@@ -87,7 +95,7 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                 std::unique_lock<std::mutex> lk(queue_mux_);
                 bool timed_out = !queue_cv_.wait_for(
                     lk,
-                    std::chrono::seconds(5),
+                    std::chrono::milliseconds(kReplayWatchPeriodMs),
                     [this]
                     {
                         return !replay_log_queue_.empty() ||
@@ -98,31 +106,46 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                 // Only check for orphaned ng recovery on timeout, not on notify
                 if (timed_out)
                 {
-                    // Periodically check candidate leaders that still do not
-                    // have replay stream connections.
+                    // A candidate leader's first replay request comes from its
+                    // leader start (Sharder::RequestLogReplay). Ask a log
+                    // group again only while it owes the replay -- it has
+                    // neither finished this term's replay nor a recovering
+                    // stream to this node -- kReplayCheckIntervalUs after the
+                    // last send to it. The stream is the only proof that a log
+                    // group got a request: a lost request, a log group with no
+                    // leader and a lost reply look the same here. A stream
+                    // that opened and then stalls is left to its idle timeout
+                    // (on_idle_timeout).
+                    //
+                    // Only the node groups this node is recovering have a
+                    // watch: a candidate term's first request creates it
+                    // (ProcessReplayLogTask), and it is dropped here once the
+                    // node is no longer a candidate leader of the node group.
                     lk.unlock();
                     uint64_t now_ts = LocalCcShards::ClockTs();
-                    auto ngs = Sharder::Instance().AllNodeGroups();
-                    for (auto ng_id : *ngs)
+                    const uint32_t log_group_cnt =
+                        log_agent_ != nullptr ? log_agent_->LogGroupCount() : 0;
+                    for (auto watch_it = candidate_replay_watch_.begin();
+                         watch_it != candidate_replay_watch_.end();)
                     {
-                        int64_t candidate_term =
+                        const uint32_t ng_id = watch_it->first;
+                        CandidateReplayWatch &watch = watch_it->second;
+                        const int64_t candidate_term =
                             Sharder::Instance().CandidateLeaderTerm(ng_id);
                         if (candidate_term < 0)
                         {
-                            candidate_replay_watch_.erase(ng_id);
+                            watch_it = candidate_replay_watch_.erase(watch_it);
+                            continue;
+                        }
+                        if (watch.term != candidate_term)
+                        {
+                            // A newer candidate term whose leader start's
+                            // request is not sent yet.
+                            ++watch_it;
                             continue;
                         }
 
-                        CandidateReplayWatch &watch =
-                            candidate_replay_watch_[ng_id];
-                        if (watch.term != candidate_term)
-                        {
-                            watch.term = candidate_term;
-                            watch.first_seen_ts = now_ts;
-                            watch.last_replay_ts = 0;
-                        }
-
-                        bool has_replay_connection = false;
+                        std::unordered_set<uint32_t> streaming;
                         {
                             std::unique_lock<bthread::Mutex> inbound_lk(
                                 inbound_mux_);
@@ -133,40 +156,39 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                                         candidate_term &&
                                     entry.second->recovering_)
                                 {
-                                    has_replay_connection = true;
-                                    break;
+                                    streaming.insert(
+                                        entry.second->log_group_id_);
                                 }
                             }
                         }
-                        if (has_replay_connection)
+                        for (uint32_t lg_id = 0; lg_id < log_group_cnt; ++lg_id)
                         {
-                            watch.first_seen_ts = 0;
-                            continue;
+                            if (streaming.count(lg_id) > 0)
+                            {
+                                watch.last_send_ts[lg_id] = now_ts;
+                                continue;
+                            }
+                            if (Sharder::Instance().CheckLogGroupReplayFinished(
+                                    ng_id, lg_id, candidate_term) ||
+                                now_ts - watch.last_send_ts[lg_id] <
+                                    kReplayCheckIntervalUs)
+                            {
+                                continue;
+                            }
+                            LOG(INFO)
+                                << "Requesting log replay for ng: " << ng_id
+                                << " at term: " << candidate_term
+                                << " from log group " << lg_id
+                                << " again: no recovery connection "
+                                << kReplayCheckIntervalUs / 1000
+                                << " ms after the last request";
+                            ReplayLog(ng_id,
+                                      candidate_term,
+                                      static_cast<int>(lg_id),
+                                      watch.replay_start_ts);
+                            watch.last_send_ts[lg_id] = now_ts;
                         }
-
-                        if (watch.first_seen_ts == 0)
-                        {
-                            watch.first_seen_ts = now_ts;
-                        }
-
-                        if (now_ts - watch.first_seen_ts <
-                            kReplayCheckIntervalUs)
-                        {
-                            continue;
-                        }
-
-                        if (watch.last_replay_ts != 0 &&
-                            now_ts - watch.last_replay_ts <
-                                kReplayCheckIntervalUs)
-                        {
-                            continue;
-                        }
-
-                        LOG(INFO) << "Requesting log replay for ng: " << ng_id
-                                  << " at term: " << candidate_term
-                                  << " as there is no recovery connection";
-                        ReplayLog(ng_id, candidate_term, -1, 0, false);
-                        watch.last_replay_ts = now_ts;
+                        ++watch_it;
                     }
                     lk.lock();
                 }
@@ -184,16 +206,6 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                     ProcessReplayLogTask(task);
                     continue;
                 }
-                if (!delayed_replay_queue_.empty())
-                {
-                    int ready_cnt = ProcessDelayedReplayLogTask();
-                    if (ready_cnt > 0)
-                    {
-                        // ReplayLog task is of the highest priority, continue
-                        // to next round and process the ready ReplayTask
-                        continue;
-                    }
-                }
                 if (!recover_tx_queue_.empty())
                 {
                     RecoverTxTask task = recover_tx_queue_.front();
@@ -208,30 +220,6 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
             }
         });
     pthread_setname_np(notify_thread_.native_handle(), "replay_notify");
-}
-
-bool RecoveryService::ReplayNow(ReplayLogTask &task)
-{
-    // queued_clock_ == 0 means it's not a delayed request.
-    if (task.queued_clock_ == 0)
-    {
-        return true;
-    }
-
-    // check whether the delayed request can be executed now.
-    uint64_t now_ts = LocalCcShards::ClockTs();
-    using namespace std::chrono_literals;
-    uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::seconds(30))
-                            .count();
-    if (now_ts - task.queued_clock_ > duration)
-    {
-        return true;
-    }
-    else
-    {
-        return false;
-    }
 }
 
 void RecoveryService::Shutdown()
@@ -397,21 +385,11 @@ void RecoveryService::NotifyCheckpointer(
 void RecoveryService::ReplayLog(uint32_t cc_ng_id,
                                 int64_t cc_ng_term,
                                 int log_group,
-                                uint64_t replay_start_ts,
-                                bool delayed_request)
+                                uint64_t replay_start_ts)
 {
     std::unique_lock lk(queue_mux_);
-    if (delayed_request)
-    {
-        uint64_t queued_clock = LocalCcShards::ClockTs();
-        delayed_replay_queue_.emplace_back(
-            cc_ng_id, cc_ng_term, log_group, replay_start_ts, queued_clock);
-    }
-    else
-    {
-        replay_log_queue_.emplace_back(
-            cc_ng_id, cc_ng_term, log_group, replay_start_ts, 0);
-    }
+    replay_log_queue_.emplace_back(
+        cc_ng_id, cc_ng_term, log_group, replay_start_ts);
     queue_cv_.notify_one();
 }
 
@@ -431,6 +409,24 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                                           butil::IOBuf *const messages[],
                                           size_t size)
 {
+#ifdef WITH_FAULT_INJECT
+    // Test only: drops one replay stream, as a broken connection would. Its
+    // log group then goes silent, and the watchdog asks it again.
+    if (stream_id == fault_dropped_stream_.load(std::memory_order_relaxed))
+    {
+        return 0;
+    }
+    CODE_FAULT_INJECTOR("replay_drop_stream_once", {
+        FaultInject::Instance().InjectFault("replay_drop_stream_once",
+                                            "remove");
+        fault_dropped_stream_.store(stream_id, std::memory_order_relaxed);
+        LOG(INFO) << "FaultInject replay_drop_stream_once: dropping replay "
+                     "stream "
+                  << stream_id;
+        brpc::StreamClose(stream_id);
+        return 0;
+    });
+#endif
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
         table_range_split_cnt;
     std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>
@@ -465,12 +461,26 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
         {
             std::unordered_set<TableName> range_split_tables;
             // All of the shema and range split logs should be in the first msg.
-            // Collect which tables are range splitting. For these table we only
-            // need to recover write intent on catalog entry instead of write
-            // lock when processing schema op msg.
+            // Collect the tables with a split in flight that this node group
+            // coordinates. Such a split holds the table's catalog read lock
+            // here (the data sync running it reads the catalog locally), and
+            // its recovery takes it again; so no schema op holds the table's
+            // write lock here, and a participant restores only a write intent
+            // (catalog_cc_map.h, Execute(ReplayLogCc&)). A split coordinated
+            // by another node group locks nothing here and proves nothing.
+            const uint32_t recovering_ng_id = msg.cc_node_group_id();
             for (const ::txlog::ReplaySplitRangeMsg &split_range_msg :
                  msg.split_range_op_msgs())
             {
+                const uint32_t split_tx_ng_id =
+                    (split_range_msg.txn() >> 32L) >> 10;
+                if (split_tx_ng_id != recovering_ng_id ||
+                    Sharder::Instance().CandidateLeaderTerm(split_tx_ng_id) < 0)
+                {
+                    // The condition range_cc_map.h's Execute(ReplayLogCc&)
+                    // uses to recover the split here.
+                    continue;
+                }
                 const std::string &split_range_op_blob =
                     split_range_msg.split_range_op_blob();
                 size_t blob_offset = 0;
@@ -499,8 +509,9 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 range_split_tables.insert(base_table_name);
             }
 
-            // Barrier #1: collect global range splitting tables (base
-            // tables) before starting schema replay.
+            // Barrier #1: collect, from every log group, the base tables with
+            // a split in flight that this node group coordinates before
+            // starting schema replay.
             if (barrier != nullptr &&
                 !barrier->WaitSplitTableCollected(
                     info, stream_id, std::move(range_split_tables)))
@@ -975,24 +986,18 @@ void RecoveryService::WaitAndClearRequests(brpc::StreamId stream_id,
 
         error_node_group_id = it->second->cc_ng_id_;
         error_term = it->second->cc_ng_term_;
-        uint64_t replay_start_ts = 0;
 
-        // close all the streams belonging to the current node group and term.
+        // The replay failed: close all the streams belonging to the current
+        // node group and term. The log groups that have not finished the
+        // term's replay then have no stream, and the watchdog asks them again.
         for (const auto &[stream_id, info] : inbound_connections_)
         {
-            assert(replay_start_ts == 0 ||
-                   replay_start_ts == info->replay_start_ts_);
-            replay_start_ts = info->replay_start_ts_;
             if (info->cc_ng_id_ == error_node_group_id &&
                 info->cc_ng_term_ == error_term)
             {
                 brpc::StreamClose(stream_id);
             }
         }
-        // put the replay log request back to the replay queue, but the replay
-        // request will be scheduled with 10 senconds delay. log_id = -1 means
-        // replay from all the log groups.
-        ReplayLog(error_node_group_id, error_term, -1, replay_start_ts, true);
     }
 }
 
@@ -1011,42 +1016,55 @@ void RecoveryService::ClearTx(uint64_t tx_number)
 
 void RecoveryService::ProcessReplayLogTask(ReplayLogTask &task)
 {
-    if (Sharder::Instance().CandidateLeaderTerm(task.cc_ng_id_) < 0)
+    const uint32_t ng_id = task.cc_ng_id_;
+    const int64_t term = task.cc_ng_term_;
+    if (Sharder::Instance().CandidateLeaderTerm(ng_id) != term)
     {
-        LOG(INFO) << "node group is not recovering, skip replay.";
-        // node group is not recovering, skip replay.
+        LOG(INFO) << "node group " << ng_id << " is not recovering term "
+                  << term << ", skip replay request.";
         return;
     }
-    // call log agent replay log api
-    log_agent_->ReplayLog(task.cc_ng_id_,
-                          task.cc_ng_term_,
-                          ip_,
-                          port_,
-                          task.log_group_,
-                          task.replay_start_ts_,
-                          finish_);
-}
-
-int RecoveryService::ProcessDelayedReplayLogTask()
-{
-    // move the delayed replay requests whose timer is fired to
-    // replay_log_queue_
-    int ready_cnt = 0;
-    for (auto it = delayed_replay_queue_.begin();
-         it != delayed_replay_queue_.end();)
+    CandidateReplayWatch &watch = candidate_replay_watch_[ng_id];
+    if (watch.term != term)
     {
-        if (ReplayNow(*it))
+        // The term's first request; every later one reuses its start
+        // timestamp.
+        watch = CandidateReplayWatch{};
+        watch.term = term;
+        watch.replay_start_ts = task.replay_start_ts_;
+    }
+
+    std::vector<uint32_t> log_groups;
+    if (task.log_group_ >= 0)
+    {
+        log_groups.push_back(static_cast<uint32_t>(task.log_group_));
+    }
+    else
+    {
+        for (uint32_t lg_id = 0; lg_id < log_agent_->LogGroupCount(); ++lg_id)
         {
-            replay_log_queue_.emplace_back(*it);
-            it = delayed_replay_queue_.erase(it);
-            ready_cnt++;
-        }
-        else
-        {
-            it++;
+            log_groups.push_back(lg_id);
         }
     }
-    return ready_cnt;
+    for (uint32_t lg_id : log_groups)
+    {
+        // Checked before each send, which takes up to a few seconds.
+        if (Sharder::Instance().CandidateLeaderTerm(ng_id) != term)
+        {
+            LOG(INFO) << "node group " << ng_id << " stopped recovering term "
+                      << term << ", skip the rest of its replay request.";
+            return;
+        }
+        if (Sharder::Instance().CheckLogGroupReplayFinished(ng_id, lg_id, term))
+        {
+            continue;
+        }
+        // One bounded attempt; whatever its outcome, the watchdog asks again
+        // if no replay stream comes from the log group.
+        log_agent_->ReplayLog(
+            ng_id, term, ip_, port_, lg_id, watch.replay_start_ts);
+        watch.last_send_ts[lg_id] = LocalCcShards::ClockTs();
+    }
 }
 
 void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)

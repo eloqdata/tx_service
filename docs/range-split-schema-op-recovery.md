@@ -1,150 +1,223 @@
-# Recovering a range split together with a schema op (deferred)
+# The catalog lock a recovered schema op restores, and range splits
 
-**Status: open, deferred.** Found while reviewing the recovery of schema ops in the EloqDoc CDC
-project (PR 7, 2026-09-29). Nothing described under "Target design" is implemented. The current
-behavior works, but it weakens the catalog lock of a schema op recovered from its prepare log to
-keep recovery from waiting on a range split. An op recovered from its commit log restores a write
-intent in any case (PR 8, 2026-09-30), so the commit stage is not affected.
+**Status: resolved 2026-10-09**; section 6.2 resolved 2026-10-15. Found while reviewing
+schema-op recovery in the EloqDoc CDC project (PR 7, 2026-09-29). Section 6.1 records a data loss
+in range splits that the tests found, fixed 2026-10-10. Section 7 records the target design this
+replaces.
 
-Key files: `tx_service/src/fault/log_replay_service.cpp` (replay order, barriers),
-`tx_service/include/cc/catalog_cc_map.h` (`Execute(ReplayLogCc&)`, the schema record's lock),
-`tx_service/include/cc/range_cc_map.h` (`Execute(ReplayLogCc&)`, the split record's range state and
-lock), `tx_service/src/cc/local_cc_shards.cpp` (`CreateSplitRangeRecoveryTx`, the data-sync task
-limiter), `tx_service/include/cc/cc_request.h` (`ReplayLogCc::RangeSplitting`).
+Key files: `tx_service/include/cc/catalog_cc_map.h` (`Execute(ReplayLogCc&)`, the schema record's
+lock), `tx_service/src/fault/log_replay_service.cpp` (barrier #1, the split set),
+`tx_service/include/cc/range_cc_map.h` (`Execute(ReplayLogCc&)`, a split's recovery),
+`tx_service/src/cc/local_cc_shards.cpp` (the data sync's catalog read lock, `SplitFlushRange`),
+`tx_service/src/tx_operation.cpp` (`AcquireAllOp::Forward`, the liveness check of a blocked
+request).
 
-## 1. Why the two can be in flight together
+## 1. Coordinator and participant
 
-- A range split runs inside its range's data sync. The split's tx holds the table's catalog read
-  lock for the split's whole duration (`local_cc_shards.cpp`, "We're still holding catalog read
-  lock here"). Its log has three stages (`SplitRangeOpMessage.Stage`): `PrepareSplit`,
-  `CommitSplit`, `CleanSplit`; the clean log removes the op from the log state, so replay sees only
-  the first two.
-- A schema op holds the catalog write lock in one section (`UpsertTableOp`: from its write locks,
-  just before its commit log, to `PostCommit`) or two (`UpsertTableIndexOp`: before its prepare
-  log until `PrepareCommit` downgrades to an intent, and again before its commit log until
-  `PostCommit`).
-- A write lock excludes a read lock, so in normal execution a split never overlaps those sections.
-  It runs while the schema op holds only a write intent, which a read lock does not conflict with
-  (for example between an `UpsertTableOp`'s prepare log and its write locks), or after the op's
-  `PostCommit`, while its commit record still waits for the clean log.
-- A crash can therefore leave, for the same table, a schema op's record (prepare or commit stage)
-  and a split's record (prepare or commit stage) in the log state. Both are recovered.
+Every node group holds a copy of a table's catalog entry, and a schema op locks the copy on every
+node group. When a node group recovers, its replay of the op's log record restores a lock on its
+copy, and what it must restore differs by role:
 
-## 2. Current recovery
+- **The coordinator's node group** (the node group of the op's tx,
+  `(txn >> 32) >> 10 == ng_id`, and this node is its candidate leader) also recovers the op itself
+  (`CreateSchemaRecoveryTx`). The recovered op redoes every step after the log record it was
+  recovered from, including the write locks it takes before its commit log, and that step drains
+  the DML admitted in the meantime. So the coordinator only needs to keep a newer DDL off the table
+  until then: a write intent.
+- **A participant** recovers while the coordinator lives on elsewhere, and cannot tell how far the
+  coordinator got. The coordinator may already hold this node group's write lock, the last step
+  before its commit log, and it does not ask for it again. So a participant restores the lock the
+  coordinator may rely on. After a prepare-stage record, that is the write lock, the state right
+  before the commit log: without it, DML admitted on the recovered node group could commit above
+  the op's commit timestamp under the old schema, breaking the barrier the commit log draws. After a
+  commit-stage record, it restores the committed schema and no lock. The coordinator's later post
+  writes find no lock of the tx there and finish at once.
 
-Replay of one log stream (`log_replay_service.cpp`):
-
-1. **Collect split tables** (barrier #1). From the first replay message, read only the table name
-   of each split record and gather the base tables across all streams. Nothing is replayed.
-2. **Replay schema records**, one at a time, to the catalog map. Each `ReplayLogCc` carries a
-   pointer to the set from step 1 (`ReplayLogCc::RangeSplitting`).
-3. **Replay split records** to the range map.
-4. **Barrier #2**: data-log replay waits until every stream has replayed its schema and split
-   records.
-
-A schema record restores the catalog lock by stage (`catalog_cc_map.h`):
-
-| Stage | Node group | Lock restored |
+| Record | Coordinator's node group | Participant |
 |---|---|---|
-| `PrepareSchema` | every node group | write lock; **write intent if the table is in the split set**, or for add index |
-| `PrepareData` | every node group | write intent |
-| `CommitSchema` | coordinator | write intent: the entry already holds the committed schema |
-| `CommitSchema` | participant | none |
+| `PrepareSchema` | write intent; the op resumes after its prepare log | write lock, with the two exceptions in section 2 |
+| `PrepareData` (add index) | write intent; the op resumes after its prepare data log | after the build's last record, the write lock, with the split exception of section 2; before it, a write intent (section 6.2) |
+| `CommitSchema` | write intent; the op resumes after its commit log and releases the participants | the committed schema, no lock |
 
-A split record restores (`range_cc_map.h`):
+The restored lock's holder carries term 0: after the prepare log the lock and the op are recovered
+whatever fails, so no term marks the holder as failed.
 
-| Stage | Node group | State and locks |
+## 2. When a participant can restore only an intent
+
+A participant restores a write intent instead of the write lock exactly when the coordinator cannot
+hold this node group's write lock:
+
+1. **An add index's `PrepareSchema` record.** Between its prepare log and its first prepare data log
+   the op holds only an intent: its write lock spans the prepare log, and the step right after
+   (`PrepareCommit`, `downgrade_all_lock_to_intent_op_`) turns it into an intent. Replay rebuilds
+   the state after that step (the dirty schema at the op's timestamp), and the downgrade, when it
+   comes, finds an intent and changes nothing.
+2. **A split of the table that this node group coordinates is in flight.** The data sync that runs
+   a split reads the table's catalog with a local read lock (`read_local`), on its own node group
+   only. It takes the lock before the split's first log, runs the split inside the same tx
+   (`SplitFlushRange`, `split_txm` is the data sync's tx) through its clean log, and commits only
+   after it. So while the split's record is in the log state, the read lock is held, and on
+   recovery the split's recovery tx (`CreateSplitRangeRecoveryTx`) takes it again before replay
+   finishes. A read lock excludes every write lock, so the coordinator holds no write lock on this
+   node group, neither a prepare-stage one nor its commit-phase one. Restoring the write lock would
+   both overstate the state and stall recovery: replay finishes only once the recovered split holds
+   its catalog read lock, which the write lock would hold up until the op's `PostCommit`.
+
+A split coordinated by another node group locks nothing on this one and proves nothing about it.
+Barrier #1 therefore collects, from every log group's first replay message, only the splits whose
+tx belongs to the recovering node group, under the condition `range_cc_map.h` uses to recover a
+split there.
+
+This holds for every writer of a prepare-stage schema record:
+
+| Writer | Write lock across its prepare record | Write lock again before its commit log |
 |---|---|---|
-| `PrepareSplit` | coordinator | write lock on the old range's cc entry; the recovery tx installs the dirty range |
-| `PrepareSplit` | participant | dirty range info; write lock on the old range's cc entry |
-| `CommitSplit` | coordinator | current and dirty range info, slice specs from the log; write lock on the old range's cc entry |
-| `CommitSplit` | participant | dirty range info promoted to current, new range records; no lock |
+| `UpsertTableOp` (create, drop, truncate, alter) | no, intents | yes, at the commit-stage timestamp |
+| `UpsertTableIndexOp` (add, drop index) | yes, until `PrepareCommit` downgrades it | yes (drop index acquires; add index after its last prepare data log) |
+| A DML that updates a catalog (`CatalogAcquireAllOp`, `FlushUpdateTableOp`; EloqDoc's insert that makes an index multikey) | yes, across the data log that carries the record, until `PrepareCommit` downgrades it | no, intents until its commit log |
 
-On the split's coordinator, `CreateSplitRangeRecoveryTx` then takes blocking read locks on the
-cluster config, the table's catalog entry and the range's bucket, registers the range's data-sync
-task limiter, and only then finishes the replay request (`SetFinish()`), after which it resumes the
-split.
+Whatever the writer, a split's read lock on a node group means the op is outside every write-lock
+section there. Create and truncate cannot have a split in flight: a new table has no ranges to
+split, and a truncate runs only on EloqKV tables, which are hash partitioned.
 
-**The coupling.** Recovery counts as finished only once every recovered split holds its catalog
-read lock. The write lock a prepare-stage schema record restores on the same table would hold that
-up until the recovered schema op releases it at `PostCommit`, possibly after retrying a failing
-data store step for as long as the store is down. To avoid the stall, the schema record restores
-only a write intent when its table is in the split set.
+## 3. The coordinator's lost request
 
-## 3. The flaw
+When a participant recovers with a split of its own in flight, the coordinator's write lock
+request to it was waiting behind the split's read lock, and it is lost with the old leader. The
+coordinator finds this and sends the request again:
 
-The schema op's recovered lock is weakened so that a split can finish its part of recovery, though
-in normal execution a split never overlaps a schema op's write-lock section. The weakening follows
-only from where "recovery finished" is drawn, and it costs:
+1. Under 2PL a participant that cannot grant a lock at once acknowledges the request, with the
+   blocked entry's address and its term. Once the request stays unfinished past the tx's timeout
+   (`TransactionExecution::IsTimeOut`, 10 s), `AcquireAllOp::Forward` sends
+   `BlockAcquireAllCcReqCheck` to the node group. The new leader compares the request's term with
+   its own and answers `ErrorTerm`, which fails the request with `NG_TERM_CHANGED`. A request no
+   longer queued is answered `REQUEST_LOST`; a check unanswered for 10 s, or a request never
+   acknowledged, fails the same way. A request still waiting legitimately is answered `BlockQueue`
+   and keeps waiting.
+2. The failed step is retried while the coordinator leads: `UpsertTableOp::AcquireWriteLocks`, and
+   the index op's commit-stage `acquire_all_lock_op_`, both because a schema op past its prepare
+   log can only roll forward.
+3. The new request reaches the participant after its recovery has finished, behind the recovered
+   split's read lock and the read locks of the DML admitted since. The grant waits for them, and
+   its timestamps put the commit timestamp above them: the barrier holds.
 
-- **Recovered state that depends on an unrelated op.** Whether a schema op comes back with a lock
-  or an intent depends on whether some split happened to be in flight on the table.
-- **Global over-reach.** The split set is global: a split whose coordinator is another node group,
-  whose catalog read lock this node never re-takes, still weakens the lock here.
+The same mechanism serves a participant that restored the write lock: the request sent again finds
+the tx's own lock.
 
-## 4. Target design
+## 4. What this replaced
 
-- **Schema records restore the lock their stage implies.** `PrepareSchema`: a write lock (an intent
-  for add index, for add index's own reason: between its prepare log and its prepare index log it
-  holds only an intent, and its build takes range read locks). No split-set check. `CommitSchema`
-  already restores the coordinator's write intent whatever the split set holds.
-- **A recovered split finishes its part of recovery once it holds what recovery must guarantee**:
-  its range write locks, which the range map restores, and its data-sync task limiter entry. The
-  limiter is a per-range marker (node group, term, table, range id): while it exists, a new data
-  sync of the range queues behind the running one. Checkpoints start only after recovery, so the
-  entry must exist before `SetFinish()`, as it does today. `CreateSplitRangeRecoveryTx` calls
-  `SetFinish()` then and takes the catalog read lock afterwards, waiting behind a recovered schema
-  op's write lock until that op's `PostCommit`. The cluster config and bucket read locks do not
-  conflict with a schema op and may stay before `SetFinish()`.
-- **The order is the commit-timestamp order.** A schema op recovered from its prepare log
-  re-derives its commit-stage timestamp above every logged commit: the recovering node's clock
-  starts at the log's latest commit timestamp (`Sharder::FinishLogReplay`), and `AcquireAllCc`
-  reports at least the grant's local time. So a split in flight is ordered before the schema op,
-  though it resumes after it. Effects ordered by timestamp need nothing; effects that are not must
-  still follow the timestamp order:
-  - **After a DROP**, the split's table is gone. The drop deleted the table's range records with a
-    prefix delete that carries no timestamp (`DataStoreServiceClient::DeleteTableRanges`), and its
-    `PostCommit` dropped the range cc map holding the split's restored range lock. The resumed
-    split must give up: release its range lock, write its clean log (from `PrepareSplit` or
-    `CommitSplit`), write nothing to the store, and pop its pending data-sync task.
-  - **After an ALTER or an index op**, the split resumes under the new schema. Its recovery tx
-    already picks the dirty or the current schema when it reads the catalog.
-  - **CREATE and TRUNCATE** cannot have a split in flight: a new table has none yet, and a truncate
-    runs only on EloqKV tables, which are hash partitioned.
-  - **A schema op recovered from its commit log** has a timestamp below the split's, which started
-    after the op's `PostCommit`. The op's recovered steps only redo work finished before the split
-    began.
+Before, a `PrepareSchema` record restored a write lock on every node group, the coordinator's
+included, and an intent on any node group when the table had a split in flight anywhere in the
+cluster (barrier #1 collected every split record of every log group). Two consequences:
 
-## 5. Constraints to keep
+- **A hole on participants.** With a split in flight on node group M, the coordinator's write lock
+  can be granted on another node group N while its request waits on M. If N then recovered, it
+  restored only an intent, although the coordinator held, and relied on, N's write lock. DML
+  admitted on N could commit above the op's commit timestamp under the old schema. For EloqDoc's
+  change data capture that is a write event after its collection's drop or alter.
+- **A stall on the coordinator's node group.** Its write lock held up the recovery of a split on the
+  same table there until the recovered op's `PostCommit`, possibly for as long as a failing data
+  store step kept retrying.
 
-- A recovered schema op holding the catalog write lock must never wait on a range lock: the split
-  holds its range write lock while it waits for the catalog. This holds today. `UpsertTableOp`
-  takes no range locks; add index takes range read locks only during its build, under an intent.
-- The limiter entry is registered before `SetFinish()`.
-- Failures after `SetFinish()` need their own path. Today a failed read of the recovery tx's locks
-  (`lock_meta_failed`, for example a lost leadership) aborts the replay request; after
-  `SetFinish()` there is no replay request to abort, so the recovery tx must abort itself and leave
-  the split to the next leader.
+## 5. Tests
 
-## 6. To-do
+- `cmake/tests/ddl_recovery.py` (viii) in EloqDoc: an ALTER killed after its prepare log, on a single
+  node (the coordinator's node group), is rolled forward, and the table's documents written before
+  the crash are replayed.
+- `cmake/tests/multinode/ddl_split_recovery.py` in EloqDoc, on a cluster of three node groups run as
+  separate processes (`cluster.py`; a build with fault points and the EloqStore data store service,
+  first run with RocksDB). A checkpoint splits the loaded collection's range on node group X and a fault point
+  (`split_flush_range_install_dirty_continue`) holds the split after its prepare log; an ALTER from
+  Y waits for X's write lock; Z is the third node group:
+  - (i) X recovers: replay finishes, the coordinator's lost request fails and is sent again, and the
+    ALTER commits once the recovered split finishes;
+  - (ii) Z, which granted its write lock, recovers: it restores the write lock, so it serves nothing
+    until the ALTER commits (its start-up reads every collection's catalog, EloqDoc's
+    `KVCatalog::init`). Built without this change, Z restored an intent and served at once at the
+    old catalog version: the test fails there;
+  - (iii) Y recovers: the recovered ALTER takes its write locks again, Y's own included, and commits
+    once the split is released;
+  - (iv) X coordinates the ALTER itself and recovers: the recovered split and the ALTER both finish.
 
-1. `CreateSplitRangeRecoveryTx`: move `SetFinish()` ahead of the catalog read lock, after the
-   limiter registration.
-2. The split's "table dropped" path: on a `Deleted` catalog record, release the range lock, write
-   the clean log, pop the pending data-sync task.
-3. The recovery tx's failure path after `SetFinish()` (section 5).
-4. `catalog_cc_map.h`, `Execute(ReplayLogCc&)`: drop `req.RangeSplitting(...)` from the
-   `PrepareSchema` case, its only use.
-5. `log_replay_service.cpp`: remove barrier #1's collection of split tables and the
-   `range_splitting_` plumbing into `ReplayLogCc` (`RangeSplitting`, the pointer passed with each
-   schema record); it has no other consumer.
-6. Tests, for a schema op and a split on the same table recovered together:
-   - a DROP recovered from its prepare log with a split in `PrepareSplit`, and in `CommitSplit`:
-     the split gives up, no range records of the dropped table remain, and the name can be reused;
-   - an ALTER and an add index with a split in flight: the split resumes under the new schema;
-   - a schema op recovered from its commit log with a split started after its `PostCommit`.
+  A node whose catalog entry a recovered schema op write-locks finishes its start-up only once the
+  op commits, as reads of the table through it would wait without the crash.
 
-   These need a fault point that crashes a node during a split, and a way to force a split under
-   the schema op (a small range size).
-7. Docs: `07-durability-and-recovery.md` (recovery), `08-range-and-bucket-management.md` (range
-   split).
+  Controls without a schema op test the split itself, every document checked after each: (c0) a
+  split; (c1) a split held and released; (c2) a split held while the new range's owner-to-be
+  restarts; (c3) a split, then a restart of the new range's owner at once; (c4) the same with a
+  clean restart of the whole cluster; (c5) the same after 60 s of checkpoints; (c6), (c7), (c8) 1,000
+  documents of the new range written during a held split, 250, 1 and 10 per transaction, then a
+  restart of the new range's owner at once.
+
+  The controls exposed a separate, older defect, section 6.1: (c2), (c3), (c4), (c6) and (c8) lost
+  documents, and (ii)'s document check failed whenever Z owned the new range. With its fix, all of
+  (c0)–(c8) and (i)–(iv) pass.
+
+## 6. Related findings
+
+### 6.1 Forwarded writes logged once per transaction (fixed 2026-10-10)
+
+A split's new range lost records when its owner restarted before checkpointing them: during the
+split (c2), right after it (c3), or in a clean restart of the whole cluster (c4). Schema ops play no
+part. The records lost were all writes committed during the split, after it installed its dirty
+range; the old data reaches the new owner safely.
+
+- **Old data** (committed at or below the split's data sync timestamp) is flushed by the split's
+  own data sync into the new range's partition, on the new owner's data store shard, before the
+  split's commit log. The records the old owner then uploads to the new owner are installed as
+  already persisted.
+- **Writes during the split** are double written: once the dirty range is installed, a write to
+  the new range goes to the old owner and to the new owner (`WriteSetEntry::forward_addr_`), and
+  the tx's data log record carries the key in both node groups' blobs. The split's data sync does
+  not cover them: until the new owner checkpoints them, its blob in the log is their only durable
+  copy, which its recovery replays.
+
+`TransactionExecution::FillDataLogRequest` put a forwarded key into the new owner's blob only if
+that node group had no entry yet (`if (!inserted) continue;`, commit a64a31d, #454, 2026-03-16), so
+it logged the tx's first such key per node group and dropped the rest. A key forwarded to several
+cores of one node group needs logging there only once; the check applied that to the whole
+transaction instead of to the key. In a 320 MB
+load in batches of 500, the split started during the load, and every document of the new range
+written after its dirty range install was lost except the first of each batch. Single-key
+transactions lost nothing (c7). 1,000 documents in transactions of 250 kept 4 (c6), and in
+transactions of 10 kept 100 (c8). Waiting 60 s of checkpoints before the restart lost nothing (c5).
+
+The fix logs every forwarded key into the new owner's blob, once per node group, skipping only the
+key's own node group and a node group it is already logged to. A bucket migration's double writes
+take the same path (`LockWriteRangeBucketsOp::Advance` sets `forward_addr_` for a hash-partitioned
+key whose bucket migrates and for a range whose bucket migrates), so their transactions were logged
+the same way; no test here runs a migration. Object commands (`CmdSetEntry::forward_entry_`) were
+always logged per entry. With the fix, every control and scenario of section 5 passes on the
+EloqStore build, and so do `ddl_recovery.py` and `cluster_gate.py` on a single node.
+
+### 6.2 Add index's prepare data records (resolved 2026-10-15)
+
+Add index writes a `PrepareData` record after each batch of its build, under intents, and after
+the last one takes its commit-stage write locks. The record carries the build's last finished key,
+and the last record's is positive infinity (`last_key_type = PosInfKey`). The log state keeps the
+newest record's key (a `PrepareData` record for an op already at that stage replaces the key), so a
+recovering node group replays it.
+
+A participant therefore restores:
+
+- **After the last record** (`PosInfKey`): the write lock. The build is over, and the coordinator,
+  about to take or already holding its commit-stage write lock, does not ask for it again. The
+  split exception of section 2 still applies: with a split that this node group coordinates in
+  flight, a write intent, since that split's catalog read lock excludes the coordinator's write
+  lock here.
+- **Before it**: a write intent, since the build still runs under intents. A write lock then would
+  block DML on the node group until the index commits, and could block the build's own reads.
+
+The coordinator's node group restores a write intent in both cases: the recovered op resumes from
+the record and, at the last one, takes the commit-stage write locks itself. No new record is
+needed; the last key already marks the end of the build.
+
+## 7. The target design this replaces
+
+The earlier version of this document kept the write lock on every node group and proposed letting a
+recovered split finish its part of recovery before taking its catalog read lock
+(`CreateSplitRangeRecoveryTx` calling `SetFinish()` first), so that the split resumes after the
+schema op and gives up when the op was a drop. With the roles of section 1 that is not needed: the
+coordinator restores an intent, and a participant whose own split is in flight restores one
+because the coordinator cannot hold its write lock, so no recovered split waits on a recovered
+schema op.

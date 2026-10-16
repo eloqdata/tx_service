@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <memory>
 
+#include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "common.h"
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
@@ -104,6 +105,23 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
     assert(factory != nullptr);
     ::eloqstore::KvOptions opts =
         factory->eloq_store_configs_.eloqstore_configs_;
+    if (!opts.cloud_store_path.empty())
+    {
+        // A node leading several node groups runs one store per data shard.
+        // In cloud mode the local files are a cache that a store, when it
+        // starts, takes over wholesale (re-registers, and deletes manifests
+        // and temporary files in every partition directory it maps to), so
+        // each data shard's store gets its own directory, named as the
+        // RocksDB service names its shards.
+        for (std::string &path : opts.store_path)
+        {
+            path.append("/ds_").append(std::to_string(shard_id));
+        }
+    }
+    // This store's data shard, not the process, decides which partitions the
+    // store's sweeps take (SetPartitionBuckets).
+    opts.partition_filter = [this](const ::eloqstore::TableIdent &table_ident)
+    { return OwnsPartition(table_ident); };
     branch_name_ = factory->eloq_store_configs_.branch_name_;
     DLOG(INFO) << "Create EloqStore storage with workers: " << opts.num_threads
                << ", store path: " << opts.store_path.front()
@@ -111,6 +129,41 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
                << ", cloud store path: " << opts.cloud_store_path
                << ", buffer pool size per shard: " << opts.buffer_pool_size;
     eloq_store_service_ = std::make_unique<::eloqstore::EloqStore>(opts);
+}
+
+void EloqStoreDataStore::SetPartitionBuckets(
+    const std::unordered_set<uint16_t> &bucket_ids)
+{
+    partition_buckets_ = bucket_ids;
+}
+
+bool EloqStoreDataStore::OwnsPartition(
+    const ::eloqstore::TableIdent &table_ident) const
+{
+    if (partition_buckets_.empty())
+    {
+        return true;
+    }
+    const std::string &table_name = table_ident.tbl_name_;
+    uint16_t bucket_id;
+    if (table_name.compare(0, 8, "eloqdoc_") == 0 ||
+        table_name.compare(0, 8, "eloqsql_") == 0 ||
+        table_name.compare(0, 7, "irange_") == 0)
+    {
+        // This table engine uses RangePartition: the partition is a range.
+        uint32_t hash_val;
+        butil::MurmurHash3_x86_32(&table_ident.partition_id_,
+                                  sizeof(table_ident.partition_id_),
+                                  9001,
+                                  &hash_val);
+        bucket_id = hash_val % 1024;
+    }
+    else
+    {
+        // HashPartition: the hash partition id equals the bucket id.
+        bucket_id = static_cast<uint16_t>(table_ident.partition_id_);
+    }
+    return partition_buckets_.find(bucket_id) != partition_buckets_.end();
 }
 
 bool EloqStoreDataStore::Initialize()

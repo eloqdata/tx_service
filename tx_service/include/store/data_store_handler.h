@@ -541,6 +541,32 @@ public:
         return true;
     }
 
+    /**
+     * @brief Notifies the store of a node group's leader at a newer term.
+     *
+     * Called on every node when it learns of a newer leader term
+     * (Sharder::UpdateLeader), also when the leader is the same node,
+     * whether or not the node is a member of the group. Does nothing by
+     * default; a store whose data shards follow the node groups, each hosted
+     * by its group's leader, records the shard's host and version.
+     *
+     * @param ng_id The node group.
+     * @param leader_node_id The node now leading it.
+     * @param term The node group's leader term of that node, the one
+     * number every node derives for the same leadership, so a store that
+     * versions its shards by ownership can take it as the shard's version.
+     * Calls may arrive in any order; such a store ignores one whose term is
+     * below the shard's version, which leaves the newest leader in place.
+     */
+    virtual void OnLeaderChanged(uint32_t ng_id,
+                                 uint32_t leader_node_id,
+                                 int64_t term)
+    {
+        (void) ng_id;
+        (void) leader_node_id;
+        (void) term;
+    }
+
     virtual std::string SnapshotSyncDestPath() const
     {
         return std::string("");

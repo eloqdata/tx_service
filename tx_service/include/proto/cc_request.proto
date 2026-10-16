@@ -417,6 +417,9 @@ message FetchNodeInfoResponse{
     uint32 node_id = 2 ;
     NodeRole role = 3 ;
     NodeStatus status = 4;
+    // The node group's leader term when the node leads it (role LeaderNode:
+    // Online once it serves, Loading while it replays the log); 0 otherwise.
+    int64 leader_term = 5;
 }
 
 message ResetStandbySequenceIdRequest{

@@ -108,9 +108,16 @@ work (e.g. `StoreRange::LoadSlice()`) on a specific shard's context.
 `LocalCcShards` owns the `std::vector<std::unique_ptr<CcShard>> cc_shards_` (one per
 `core_num`) plus everything shared across shards:
 
-- **Clock**: static `local_clock` advanced by a dedicated `tx_timer` thread (`TimerRun()`), read
-  via `ClockTs()`; per-node `ts_base_` (`TsBase()` / monotonic CAS `UpdateTsBase()`) is the
-  timestamp source for `CcShard::Now()`.
+- **Clock**: static `local_clock` advanced by a dedicated `tx_timer` thread (`TimerRun()`, every
+  100 ms), read via `ClockTs()`; per-node `ts_base_` (`TsBase()` / monotonic CAS
+  `UpdateTsBase()`) is the timestamp source for `CcShard::Now()`. A snapshot-isolation
+  transaction's start timestamp (`CcShard::NewTx`) is `max(Now(), wall clock)`, and a newer wall
+  clock advances the base: commits take timestamps above their own node's base, so a start
+  timestamp from another node's base alone, up to 100 ms stale, made a snapshot read miss writes
+  that node had already acknowledged. Other isolation levels read no snapshot and take `Now()`. Across hosts, a read-only transaction's
+  start timestamp can still trail another host's commits by their clock skew; this is accepted. A
+  write transaction spanning two nodes orders their later writes anyway: each participant records
+  the timestamps it sees (`last_read_ts_`) and commits above them.
 - **Catalog & table lifecycle**: `CreateCatalog / CreateDirtyCatalog / CreateReplayCatalog /
   GetCatalog / DropCatalogs` (the `CcShard` methods of the same names just delegate);
   `CreateCcTable` exists for unit tests only. Schema objects are shared across shards; per-shard

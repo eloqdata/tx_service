@@ -965,6 +965,10 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Reach the end: the commit-stage write locks.
             LOG(INFO) << "Alter Table Index transaction post acquire all"
                       << " write lock, txn: " << txm->TxNumber();
+            CODE_FAULT_INJECTOR("alter_table_index_hold_before_commit_lock", {
+                HoldBeforeCommitLock(txm);
+                return;
+            });
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
@@ -1026,6 +1030,10 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Reach the end: the commit-stage write locks.
             LOG(INFO) << "Alter Table Index transaction post acquire all"
                       << " write lock, txn: " << txm->TxNumber();
+            CODE_FAULT_INJECTOR("alter_table_index_hold_before_commit_lock", {
+                HoldBeforeCommitLock(txm);
+                return;
+            });
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             txm->Process(acquire_all_lock_op_);
@@ -1901,6 +1909,46 @@ void UpsertTableIndexOp::DropKvTables(TransactionExecution *txm)
     op_ = &drop_kv_table_op_;
     txm->PushOperation(&drop_kv_table_op_);
     txm->Process(drop_kv_table_op_);
+}
+
+void UpsertTableIndexOp::HoldBeforeCommitLock(TransactionExecution *txm)
+{
+    static constexpr char kHold[] = "alter_table_index_hold_before_commit_lock";
+    static constexpr char kHeld[] = "alter_table_index_held_before_commit_lock";
+    // At most hold_s seconds (the fault's parameter "hold_s=N"), 60 by default.
+    // Read before kHeld is set: a test removes kHold only after seeing kHeld.
+    int hold_s = 60;
+    if (FaultEntry *entry = FaultInject::Entry(kHold); entry != nullptr)
+    {
+        auto it = entry->map_para_.find("hold_s");
+        if (it != entry->map_para_.end())
+        {
+            hold_s = std::stoi(it->second);
+        }
+    }
+    LOG(INFO) << "FaultInject " << kHold << ": holding the index op on table "
+              << table_key_.Name().StringView()
+              << " before its commit-stage write locks for at most " << hold_s
+              << " s, txn: " << txm->TxNumber();
+    FaultInject::Instance().InjectFault(kHeld, "");
+    kv_retry_wait_op_.SetBlockingWork(
+        [hold_s]()
+        {
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(hold_s);
+            while (FaultInject::Entry(kHold) != nullptr &&
+                   std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            FaultInject::Instance().InjectFault(kHeld, "remove");
+            return CcErrorCode::NO_ERROR;
+        });
+    // The kv_retry_wait_op_ stage runs kv_retry_step_ once the wait ends.
+    kv_retry_step_ = &acquire_all_lock_op_;
+    op_ = &kv_retry_wait_op_;
+    txm->PushOperation(&kv_retry_wait_op_);
+    txm->Process(kv_retry_wait_op_);
 }
 
 void UpsertTableIndexOp::MarkFailed(TransactionExecution *txm)

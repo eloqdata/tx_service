@@ -76,7 +76,7 @@ All are fixed-size arrays of 1000 atomics (max cluster size), initialized to `-1
 |---|---|---|
 | `leader_term_cache_[ng]` | This node **is leader** of `ng` at that term (fully recovered). `LeaderTerm()` | `CcNode::FinishLogGroupReplay` after *all* log groups replayed |
 | `candidate_leader_term_cache_[ng]` | This node won election for `ng` but is still replaying logs. `CandidateLeaderTerm()` | `CcNode::OnLeaderStart` |
-| `ng_leader_cache_[ng]` / `ng_leader_term_cache_[ng]` | Best-effort cache of *which node* currently leads `ng` (used to route remote requests). Explicitly "not reliable". | `UpdateLeader(...)` variants |
+| `ng_leader_cache_[ng]` / `ng_leader_term_cache_[ng]` | Best-effort cache of *which node* currently leads `ng` (used to route remote requests), and the newest leader term learned for it; see Leader-cache maintenance. | `UpdateLeader(...)` variants |
 | `standby_node_term_cache_` / `candidate_standby_node_term_cache_` | This node is a (candidate) standby subscribed at that term; encodes `(primary_term << 32) \| subscribe_id` (see `PrimaryNodeTerm()`) | subscription flow in `fault/cc_node.cpp` |
 | `standby_becoming_leader_term_cache_` | Set while a standby escalates to leader so in-flight forward messages are discarded | `CcNode::OnLeaderStart` |
 
@@ -96,15 +96,17 @@ B: CcNode::OnLeaderStart
    - was full standby?  keep warm cache, replay_start_ts = consistent_ts + 1
    - was candidate standby / cold?  ClearCcNodeGroupData, replay_start_ts = 0
    - SetCandidateTerm(g, T)   ← node is *candidate leader*: not serving yet
-        │ log_agent_->ReplayLog(g, T, ..., replay_start_ts)   (per log group)
+   - Sharder::RequestLogReplay(g, T, replay_start_ts)  ← the only request
+   then the host manager: CcRpcService.NotifyNewLeaderStart(g, B, T) to every
+   node (best effort, 100 ms timeout) → UpdateLeader(g, B, T) there
+        │ RecoveryService → LogAgent::ReplayLogOnce(g, T, lg, ..., replay_start_ts)
+        │ (per log group, one bounded attempt; a log group with no replay
+        │  stream 5 s after the last send to it is asked again)
         ▼
 B: FinishLogGroupReplay(lg, T) for each log group         (replay stream done)
    when all log groups done:
    - SetLeaderTerm(g, T); SetCandidateTerm(g, -1)         ← now serving
    - NodeGroupFinishRecovery(g)
-        │ NotifyNewLeaderStart(g, B) broadcast (best effort, 100 ms timeout)
-        ▼
-all nodes: UpdateLeader(g, B, ...)  → ng_leader_cache_[g] = B
 
 meanwhile on old leader A:  CcRpcService.OnLeaderStop(g, oldT)
    - SetLeaderTerm/SetCandidateTerm(g, -1)
@@ -114,18 +116,20 @@ other candidates:  CcRpcService.OnStartFollowing(g, T, B) → subscribe as stand
 
 Step details:
 
-- **`OnLeaderStart(term)`** (`src/fault/cc_node.cpp:257`): rejects if already candidate/leader at ≥ term. If the node *was a candidate standby*, it cannot escalate — clears data and asks for leader transfer. If it was a *full standby*, it unsubscribes all sequence groups, drains in-flight standby requests (`bthread_usleep` polling), waits for data pins, and **may keep its warm cache**: replay restarts from `min(last consistent standby ts)+1` instead of 0 (`replay_start_ts`). Otherwise it clears NG data. Sets `candidate_leader_term`, clears `recovered_log_groups_`, initializes range buckets and prebuilt tables. The node is *not* serving yet.
+- **`OnLeaderStart(term)`** (`src/fault/cc_node.cpp:257`): rejects if already candidate/leader at ≥ term. If the node *was a candidate standby*, it cannot escalate — clears data and asks for leader transfer. If it was a *full standby*, it unsubscribes all sequence groups, drains in-flight standby requests (`bthread_usleep` polling), waits for data pins, and **may keep its warm cache**: replay restarts from `min(last consistent standby ts)+1` instead of 0 (`replay_start_ts`). Otherwise it clears NG data. Sets `candidate_leader_term`, clears `recovered_log_groups_`, initializes range buckets and prebuilt tables, and finally asks every log group to replay the term's log (`Sharder::RequestLogReplay`, queued to `RecoveryService`). The node is *not* serving yet. Only the node asks, and each send is one bounded attempt (a leader lookup of at most 1 s and an RPC with a 2 s deadline, `LogAgent::ReplayLogOnce`). A lost request, a log group with no leader and a lost reply look the same to the sender, so the proof that a log group got the request is the replay stream it opens: `RecoveryService`'s watchdog asks again a log group that has neither finished the term's replay nor a recovering stream `kReplayCheckIntervalUs` (5 s) after the last send to it, reusing the first request's `replay_start_ts`, and every send first checks that the node is still the candidate leader at that term and the log group has not finished. A stream that opened and then stalls is closed by its 2 s idle timeout, which asks that log group again; a replay that fails on the node closes the node group's streams, and the watchdog asks the log groups still owing the replay. A log group asked twice ships twice (the second shipping replaces the first); that is accepted for the rare cases left, such as a send that crosses the log group's finish.
 - **`FinishLogGroupReplay`** (`cc_node.cpp:80`): as committed log records from each log group finish replaying, the group is recorded; when all `log_group_cnt_` groups are done, `candidate_leader_term` is promoted to `leader_term_cache_`, candidate term reset to -1, `NodeGroupFinishRecovery` signaled. Only now do `CheckLeaderTerm`/`TryPinNodeGroupData` succeed.
 - **`OnLeaderStop(term)`** (`cc_node.cpp:478`): zeroes both terms, calls the store handler's `OnLeaderStop`, waits until `pinning_threads_ == 0`, then `ClearCcNodeGroupData()` — the old leader's cc maps/catalogs are wiped.
 - **`OnStartFollowing(node, term, resubscribe)`** (`cc_node.cpp:698`): a candidate member that lost the election (or sees a new leader) subscribes to the new primary as a standby (`SubscribePrimaryNode`); see §6.
 - **`Failover(host, port)`** (`cc_node.cpp:529`): manual leader transfer of the native NG to a target node (waits for shard sync, then requests transfer through the host manager).
-- **`NotifyNewLeaderStart`** (`cc_node.cpp:205`): after recovery the new leader broadcasts its identity to all nodes (100 ms timeout, best effort — "remote nodes will also refresh their leader caches passively").
+- **`NotifyNewLeaderStart`** (`CcRpcService`, `cc_node_service.cpp`): once `OnLeaderStart` succeeded, the host manager sends every node the NG, its new leader and the term (100 ms timeout, best effort — "remote nodes will also refresh their leader caches passively"), and each node calls `UpdateLeader(g, B, T)`. `CcNode::NotifyNewLeaderStart` (`cc_node.cpp:205`), which sends no term, has no caller.
 
 Data pinning: `Sharder::TryPinNodeGroupData` / `UnpinNodeGroupData` bracket any thread touching NG-owned data; `OnLeaderStop` blocks until all pins are released, so an unpaired pin deadlocks leader stepdown (warned in `sharder.h:524`).
 
 ### Leader-cache maintenance
 
-`Sharder::UpdateLeader(ng)` (no-arg-leader variant) asks the host manager `GetLeader` asynchronously; `UpdateLeader(ng, node, term)` CASes `ng_leader_term_cache_` monotonically (out-of-date terms are skipped) before publishing `ng_leader_cache_`. Callers invoke it whenever a remote op fails with "not leader" (e.g. `tx_operation.cpp:188`, `cc_stream_receiver.cpp:1533`), so the cache heals lazily through errors.
+Every leader update carries its term, and the term alone orders them. A node learns a leader three ways: the host manager's `NotifyNewLeaderStart`; a log write's reply, which carries the log service's view of the NGs' leaders and terms (`UpdateLeadersFromLogInfo`); and a lookup, `Sharder::UpdateLeader(ng)`, which callers invoke at start-up and whenever a remote op fails with "not leader" (e.g. `tx_operation.cpp:188`, `cc_stream_receiver.cpp:1533`), so the cache heals lazily through errors. The lookup asks the host manager `GetLeader`, whose answer comes from braft's leader lookup and names the node only, then asks that node for its term (`FetchLeaderTerm`: its `FetchNodeInfo` reply's `leader_term`, the candidate term while it replays the log). A node that does not lead the NG answers no term, and the lookup changes nothing.
+
+`UpdateLeader(ng, node, term)` applies a leader only above the cached term (`ng_leader_term_cache_`), the leader and its term changing together under `ng_leader_mux_`; readers load `ng_leader_cache_` without the lock. So updates arriving in any order leave the newest leader cached. Every update it applies is passed to the data store (`DataStoreHandler::OnLeaderChanged`), also when the leader is the same node, with the term as the shard's version: the version must keep up with the term, or a delayed redirect naming a leader this node missed, at a term between the two, would still be accepted. The store ignores a move whose term is below the shard's version, so these calls too may arrive in any order ([09](09-store-handler.md)).
 
 ### Host manager (interface only)
 

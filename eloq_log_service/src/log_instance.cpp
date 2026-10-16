@@ -404,10 +404,9 @@ void LogInstance::ReportArrivalComplete()
     if (metrics::Meter *meter =
             published_meter_.load(std::memory_order_acquire))
     {
-        meter->Collect(
-            metrics::NAME_CDC_ARRIVAL_COMPLETE_TS,
-            static_cast<double>(
-                arrival_complete_ts_.load(std::memory_order_acquire)));
+        meter->Collect(metrics::NAME_CDC_ARRIVAL_COMPLETE_TS,
+                       static_cast<double>(arrival_complete_ts_.load(
+                           std::memory_order_acquire)));
     }
 }
 
@@ -1118,11 +1117,27 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                 {
                     std::unique_ptr<LogShippingAgent> &curr_ship_agent =
                         it->second;
+                    // The old agent stops at its next message and closes its
+                    // stream, so the two overlap only briefly.
+                    const auto terminate_start =
+                        std::chrono::steady_clock::now();
                     curr_ship_agent->Terminate();
                     while (!curr_ship_agent->IsTerminated())
                     {
                         bthread_usleep(1000);
                     }
+                    LOG(INFO)
+                        << "Replaced the log shipping agent of cc node group "
+                        << cc_ng_id << " term "
+                        << curr_ship_agent->NodeGroupTerm() << " with one for "
+                        << "term " << cc_ng_term
+                        << "; the old agent stopped in "
+                        << std::chrono::duration_cast<
+                               std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() -
+                               terminate_start)
+                               .count()
+                        << " ms";
                 }
 
                 // The new log shipping agent spawns a background

@@ -179,6 +179,10 @@ public:
 
     bool StartDB(int64_t term, uint32_t data_shard_id) override
     {
+        LOG(INFO) << "Starting the EloqStore of data shard " << data_shard_id
+                  << " at term " << term << ", owning "
+                  << partition_buckets_.size()
+                  << " buckets (0: every partition)";
         ::eloqstore::KvError res =
             eloq_store_service_->Start(branch_name_, term, data_shard_id);
         if (res != ::eloqstore::KvError::NoError)
@@ -259,6 +263,25 @@ public:
      */
     void SwitchToReadWrite() override;
 
+    /**
+     * @brief Sets the buckets of this store's data shard, which the store's
+     * partition filter (OwnsPartition) checks.
+     *
+     * Every data shard's partitions share the store's storage: one cloud
+     * store path for the cluster, and in local mode one store path per node.
+     * So the operations that sweep it (prewarm, archives for backups and
+     * standby snapshots, branches, reopen) must pick this data shard's
+     * partitions. The set belongs to the data shard, not the process: a node
+     * leading several node groups runs one store for each.
+     *
+     * @param bucket_ids The data shard's buckets; empty accepts every
+     * partition.
+     * @warning Call only while the store is stopped (the shard is Starting),
+     * since the running store reads the set without a lock.
+     */
+    void SetPartitionBuckets(
+        const std::unordered_set<uint16_t> &bucket_ids) override;
+
     void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) override;
     bool CreateSnapshotForStandby(uint32_t ng_id, std::string_view tag);
     void DeleteStandbySnapshot(uint64_t term, std::string_view tag) override;
@@ -285,6 +308,31 @@ private:
     static void OnFloor(::eloqstore::KvRequest *req);
     void ScanDelete(DeleteRangeRequest *delete_range_req);
     void Floor(ScanRequest *scan_req);
+
+    /**
+     * @brief The store's partition filter: whether a partition belongs to
+     * this store's data shard.
+     *
+     * Maps the partition to its bucket as the tx service does
+     * (Sharder::MapRangeIdToBucketId for range-partitioned tables, the hash
+     * partition itself for hash-partitioned ones) and looks the bucket up in
+     * partition_buckets_.
+     *
+     * @param table_ident The partition.
+     * @return true if it belongs to this data shard, or if no buckets are set.
+     */
+    bool OwnsPartition(const ::eloqstore::TableIdent &table_ident) const;
+
+    /**
+     * @brief Buckets of this store's data shard (SetPartitionBuckets); empty
+     * accepts every partition.
+     *
+     * Written only while the store is stopped and read by the running store
+     * through its partition filter, so it needs no lock. Declared before
+     * eloq_store_service_ so that it outlives the store, whose filter reads
+     * it.
+     */
+    std::unordered_set<uint16_t> partition_buckets_;
 
     std::unique_ptr<::eloqstore::EloqStore> eloq_store_service_{nullptr};
 

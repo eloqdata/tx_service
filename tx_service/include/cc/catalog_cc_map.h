@@ -801,24 +801,35 @@ public:
         case ::txlog::SchemaOpMessage_Stage::
             SchemaOpMessage_Stage_PrepareSchema:
         {
-            // If the prepare log has been flushed, the recovered cc ng leader
-            // replays all steps between the prepare log and the commit log,
-            // including the write lock on the schema. The recovered write lock
-            // is special in that the holding tx is not associated with the tx's
-            // term (always set to 0). This is because after the prepare log,
-            // the write lock on the schema and the coordinating tx are
-            // guaranteed to be recovered upon failures. The tx's term is not
-            // necessary here to mark whether or not if the coordinating tx has
-            // failed or not.
-            if (req.RangeSplitting(base_table_name) ||
-                op_type == OperationType::AddIndex)
+            // The lock restored is the one the coordinating tx may rely on
+            // (docs/range-split-schema-op-recovery.md). The holder's term is
+            // 0: after the prepare log the lock and the op are recovered
+            // whatever fails, so no term marks the holder as failed.
+            //
+            // The coordinator's node group restores a write intent: the op,
+            // recovered here, redoes every step after its prepare log, its
+            // write locks among them, which drain the DML admitted meanwhile.
+            //
+            // A participant cannot tell how far the live coordinator got: it
+            // may already hold this node group's write lock, the last step
+            // before its commit log, and it does not ask again. So a
+            // participant restores the write lock, keeping the commit log's
+            // barrier, unless the coordinator cannot hold it here:
+            // - an add index holds only an intent between its prepare log and
+            //   its prepare data log, the stage the record names;
+            // - a split of the table that this node group coordinates holds
+            //   the table's catalog read lock here, from before its first log
+            //   to after its clean log, and the read lock excludes every write
+            //   lock. The coordinator's write lock request, lost with the old
+            //   leader, fails its liveness check (NG_TERM_CHANGED) and is sent
+            //   again; granted here, it drains the DML admitted meanwhile.
+            const uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            const bool is_coordinator =
+                tx_node_id == req.NodeGroupId() &&
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0;
+            if (is_coordinator || op_type == OperationType::AddIndex ||
+                req.RangeSplitting(base_table_name))
             {
-                // If range splitting is also happening on this table, which
-                // must have acquired a read lock on the catalog entry, that
-                // means we only need to recover a write intent.
-                // For add index operation, between the prepare log and the
-                // prepare index table log, the recovered cc ng leader should
-                // recover the write intent on the schema.
                 lock_type = LockType::WriteIntent;
             }
             else
@@ -829,7 +840,33 @@ public:
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData:
         {
-            lock_type = LockType::WriteIntent;
+            // An add index writes this record after each batch of its build,
+            // under intents, and after the last one (last key +inf, kept by
+            // the log state) takes its commit-stage write locks. The
+            // coordinator's node group restores a write intent: the recovered
+            // op resumes from the record and takes those locks itself. A
+            // participant past the last record cannot tell whether the live
+            // coordinator already holds its write lock, so it restores the
+            // write lock, unless a split of the table that this node group
+            // coordinates is in flight, whose catalog read lock excludes that
+            // write lock (as for PrepareSchema above). Before the last record
+            // the build still runs under intents, so an intent.
+            const uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            const bool is_coordinator =
+                tx_node_id == req.NodeGroupId() &&
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0;
+            const bool build_finished =
+                schema_op_msg.last_key_type() ==
+                ::txlog::SchemaOpMessage_LastKeyType_PosInfKey;
+            if (!is_coordinator && build_finished &&
+                !req.RangeSplitting(base_table_name))
+            {
+                lock_type = LockType::WriteLock;
+            }
+            else
+            {
+                lock_type = LockType::WriteIntent;
+            }
             break;
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema:

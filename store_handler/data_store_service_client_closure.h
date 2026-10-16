@@ -875,8 +875,11 @@ public:
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
                         shard_id_, remote_node_index_, new_node_index);
 
-                    // Retry
-                    if (retry_count_ < ds_service_client_->retry_limit_)
+                    // Retry at once only if that can reach the shard
+                    // (CanRetryShardNow); otherwise the caller gets the
+                    // network error and retries on its own schedule.
+                    if (retry_count_ < ds_service_client_->retry_limit_ &&
+                        ds_service_client_->CanRetryShardNow(shard_id_))
                     {
                         self_guard.Release();
                         retry_count_++;
@@ -1204,8 +1207,11 @@ public:
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
                         shard_ids_.back(), remote_node_index_, new_node_index);
 
-                    // Retry
-                    if (retry_count_ < ds_service_client_->retry_limit_)
+                    // Retry at once only if that can reach the shard
+                    // (CanRetryShardNow); otherwise the caller gets the
+                    // network error and retries on its own schedule.
+                    if (retry_count_ < ds_service_client_->retry_limit_ &&
+                        ds_service_client_->CanRetryShardNow(shard_ids_.back()))
                     {
                         self_guard.Release();
                         retry_count_++;
@@ -1433,8 +1439,11 @@ public:
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
                         shard_id_, remote_node_index_, new_node_index);
 
-                    // Retry
-                    if (retry_count_ < ds_service_client_->retry_limit_)
+                    // Retry at once only if that can reach the shard
+                    // (CanRetryShardNow); otherwise the caller gets the
+                    // network error and retries on its own schedule.
+                    if (retry_count_ < ds_service_client_->retry_limit_ &&
+                        ds_service_client_->CanRetryShardNow(shard_id_))
                     {
                         self_guard.Release();
                         retry_count_++;
@@ -1659,8 +1668,11 @@ public:
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
                         shard_ids_.back(), remote_node_index_, new_node_index);
 
-                    // Retry
-                    if (retry_count_ < ds_service_client_->retry_limit_)
+                    // Retry at once only if that can reach the shard
+                    // (CanRetryShardNow); otherwise the caller gets the
+                    // network error and retries on its own schedule.
+                    if (retry_count_ < ds_service_client_->retry_limit_ &&
+                        ds_service_client_->CanRetryShardNow(shard_ids_.back()))
                     {
                         self_guard.Release();
                         retry_count_++;
@@ -1924,14 +1936,18 @@ public:
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
                         shard_id_, remote_node_index_, new_node_index);
 
-                    need_retry = true;
+                    // Retry at once only if that can reach the shard
+                    // (CanRetryShardNow); otherwise the caller gets the
+                    // network error and retries on its own schedule.
+                    need_retry =
+                        ds_service_client_->CanRetryShardNow(shard_id_);
                 }
-                else
-                {
-                    result_.set_error_code(
-                        EloqDS::remote::DataStoreError::NETWORK_ERROR);
-                    result_.set_error_msg(cntl_.ErrorText());
-                }
+                // The error stands unless a retry replaces it: without it, a
+                // write that is not retried, or runs out of retries, would
+                // report the NO_ERROR that Reset() left in result_.
+                result_.set_error_code(
+                    EloqDS::remote::DataStoreError::NETWORK_ERROR);
+                result_.set_error_msg(cntl_.ErrorText());
             }
             else
             {
@@ -2268,8 +2284,11 @@ public:
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
                         shard_id_, remote_node_index_, new_node_index);
 
-                    // Retry
-                    if (retry_count_ < ds_service_client_->retry_limit_)
+                    // Retry at once only if that can reach the shard
+                    // (CanRetryShardNow); otherwise the caller gets the
+                    // network error and retries on its own schedule.
+                    if (retry_count_ < ds_service_client_->retry_limit_ &&
+                        ds_service_client_->CanRetryShardNow(shard_id_))
                     {
                         self_guard.Release();
                         retry_count_++;
@@ -2615,8 +2634,11 @@ public:
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
                         shard_id, remote_node_index_, new_node_index);
 
-                    // Retry
-                    if (retry_count_ < ds_service_client_->retry_limit_)
+                    // Retry at once only if that can reach the shard
+                    // (CanRetryShardNow); otherwise the caller gets the
+                    // network error and retries on its own schedule.
+                    if (retry_count_ < ds_service_client_->retry_limit_ &&
+                        ds_service_client_->CanRetryShardNow(shard_id))
                     {
                         self_guard.Release();
                         retry_count_++;

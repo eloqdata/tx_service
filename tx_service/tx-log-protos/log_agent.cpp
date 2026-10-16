@@ -590,6 +590,62 @@ void LogAgent::ReplayLog(uint32_t cc_node_group_id,
     }
 }
 
+bool LogAgent::ReplayLogOnce(uint32_t cc_node_group_id,
+                             int64_t term,
+                             const std::string &source_ip,
+                             uint16_t source_port,
+                             uint32_t log_group_id,
+                             uint64_t start_ts)
+{
+    if (RefreshLeader(log_group_id) != 0)
+    {
+        LOG(WARNING) << "ReplayLog for ng " << cc_node_group_id << " term "
+                     << term << " not sent: log group " << log_group_id
+                     << " has no known leader";
+        return false;
+    }
+    auto channel = GetChannel(log_group_id);
+    if (channel == nullptr)
+    {
+        LOG(WARNING) << "ReplayLog for ng " << cc_node_group_id << " term "
+                     << term << " not sent: no channel to log group "
+                     << log_group_id << "'s leader";
+        return false;
+    }
+
+    LogRequest req;
+    ReplayLogRequest *replay_log_req = req.mutable_replay_log_request();
+    replay_log_req->set_cc_node_group_id(cc_node_group_id);
+    replay_log_req->set_term(term);
+    replay_log_req->set_source_ip(source_ip);
+    replay_log_req->set_source_port(source_port);
+    replay_log_req->set_start_ts(start_ts);
+    replay_log_req->set_log_group_id(log_group_id);
+    LogResponse resp;
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(kReplayRequestTimeoutMs);
+    LogService_Stub stub(channel.get());
+    stub.ReplayLog(&cntl, &req, &resp, nullptr);
+    if (cntl.Failed())
+    {
+        LOG(WARNING) << "ReplayLog for ng " << cc_node_group_id << " term "
+                     << term << " to log group " << log_group_id
+                     << ": no reply (" << cntl.ErrorText() << ")";
+        return false;
+    }
+    if (resp.response_status() !=
+        LogResponse::ResponseStatus::LogResponse_ResponseStatus_Success)
+    {
+        LOG(WARNING) << "ReplayLog for ng " << cc_node_group_id << " term "
+                     << term << " to log group " << log_group_id
+                     << ": refused, status " << resp.response_status();
+        return false;
+    }
+    LOG(INFO) << "ReplayLog for ng " << cc_node_group_id << " term " << term
+              << " accepted by log group " << log_group_id;
+    return true;
+}
+
 void LogAgent::RemoveCcNodeGroup(uint32_t cc_node_group_id, int64_t term)
 {
     brpc::Controller cntl;

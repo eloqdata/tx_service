@@ -56,13 +56,11 @@ struct ReplayLogTask
     ReplayLogTask(uint32_t cc_ng_id,
                   int64_t cc_ng_term,
                   int log_group,
-                  uint64_t replay_start_ts,
-                  uint64_t queued_clock)
+                  uint64_t replay_start_ts)
         : cc_ng_id_(cc_ng_id),
           cc_ng_term_(cc_ng_term),
           log_group_(log_group),
-          replay_start_ts_(replay_start_ts),
-          queued_clock_(queued_clock)
+          replay_start_ts_(replay_start_ts)
     {
     }
 
@@ -70,9 +68,6 @@ struct ReplayLogTask
     int64_t cc_ng_term_;
     int log_group_;
     uint64_t replay_start_ts_;
-    // the clock when the request is put into the replay queue.
-    // set queued_clock_ to 0, if it's not a delayed request.
-    uint64_t queued_clock_;
 };
 
 struct RecoverTxTask
@@ -140,14 +135,14 @@ public:
                             ::google::protobuf::Closure *done) override;
 
     /**
-     * @brief Send ReplayLogRequest to log groups. If log_group is negative,
-     * send to all log groups, else just the specified log group.
+     * @brief Queues a ReplayLogRequest to the log groups, sent by the notify
+     * thread (ProcessReplayLogTask). If log_group is negative, to every log
+     * group that has not finished the term's replay, else to that one.
      */
     void ReplayLog(uint32_t cc_ng_id,
                    int64_t cc_ng_term,
                    int log_group = -1,
-                   uint64_t replay_start_ts = 0,
-                   bool delayed_request = false);
+                   uint64_t replay_start_ts = 0);
 
     void RecoverTx(uint64_t tx_number,
                    int64_t tx_term,
@@ -164,23 +159,30 @@ public:
     void on_closed(brpc::StreamId id) override;
 
 private:
+    /**
+     * @brief The replay requests for a node group this node is the candidate
+     * leader of; used by the notify thread alone.
+     */
     struct CandidateReplayWatch
     {
-        int64_t term{-1};
-        uint64_t first_seen_ts{0};
-        uint64_t last_replay_ts{0};
+        int64_t term{-1};  ///< The candidate term the fields below are for.
+        /** The start timestamp of term's first request (the leader start's),
+         * which every later request reuses. */
+        uint64_t replay_start_ts{0};
+        /** Per log group: when a request was last sent to it, or it was last
+         * seen streaming the replay. */
+        std::unordered_map<uint32_t, uint64_t> last_send_ts;
     };
 
     /**
-     * @brief ReplayNow() check whether the replay request can be processed
-     * immediately. When replay error happens, we will put the replay request
-     * into replay queue again, but with a delay (default 10 seconds).
+     * @brief Sends a queued ReplayLogRequest: one bounded attempt per log
+     * group (TxLog::ReplayLog), skipping log groups that have finished the
+     * term's replay, and none once the node is no longer the node group's
+     * candidate leader at that term. Records each send for the watchdog.
+     *
+     * @param task The request.
      */
-    bool ReplayNow(ReplayLogTask &task);
-
     void ProcessReplayLogTask(ReplayLogTask &task);
-
-    int ProcessDelayedReplayLogTask();
 
     void ProcessRecoverTxTask(RecoverTxTask &task);
 
@@ -254,7 +256,11 @@ private:
         // Current active stream for each log group.
         std::unordered_map<uint32_t, brpc::StreamId> current_stream_;
 
-        // Cross log group aggregation: schema replay range splitting tables.
+        /**
+         * Cross log group aggregation, for schema replay: the base tables with
+         * a split in flight that the recovering node group coordinates, whose
+         * catalog read lock that split holds on it.
+         */
         std::unordered_set<TableName> range_split_tables_;
 
         // Cross log group aggregation: split range commit ts for data replay.
@@ -275,6 +281,9 @@ private:
     std::unordered_map<brpc::StreamId, std::unique_ptr<ConnectionInfo>>
         inbound_connections_;
     int active_stream_cnt_ = 0;
+    /** @brief Test only: the replay stream the replay_drop_stream_once fault
+     * dropped, whose messages are ignored. */
+    std::atomic<brpc::StreamId> fault_dropped_stream_{brpc::INVALID_STREAM_ID};
     bthread::Mutex inbound_mux_;
     bthread::ConditionVariable inbound_cv_;
 
@@ -291,16 +300,31 @@ private:
 
     std::thread notify_thread_;
     std::deque<ReplayLogTask> replay_log_queue_;
-    std::deque<ReplayLogTask> delayed_replay_queue_;
     std::deque<RecoverTxTask> recover_tx_queue_;
+    /**
+     * @brief Node group id -> its replay watch, for the node groups this node
+     * is recovering only: the watchdog visits these alone.
+     */
     std::unordered_map<uint32_t, CandidateReplayWatch> candidate_replay_watch_;
     std::mutex queue_mux_;
     std::condition_variable queue_cv_;
     std::atomic<bool> finish_;
 
-    // Candidate leader has no replay stream for this duration, then trigger
-    // ReplayLog and keep retrying with the same interval until stream appears.
+    /**
+     * @brief How long a log group may go without a recovering replay stream
+     * after a request was sent to it (or its stream was last seen) before the
+     * request is sent to it again, and again at this interval until its
+     * stream appears. Counted from the send: a lost request, a log group with
+     * no leader and a lost reply look the same to the sender.
+     */
     static constexpr uint64_t kReplayCheckIntervalUs = 5ULL * 1000 * 1000;
+    /**
+     * @brief How often the watchdog looks for log groups to ask again (when
+     * the notify thread has had no task for this long), so that a resend comes
+     * within this much after kReplayCheckIntervalUs has passed. It acts only
+     * for node groups replaying the log (with a candidate term).
+     */
+    static constexpr int64_t kReplayWatchPeriodMs = 1000;
 
     // ip and port of log replay server of this node
     std::string ip_;

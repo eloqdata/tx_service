@@ -1072,10 +1072,12 @@ void FetchRangeSlicesCallback(void *data,
         }
         else if (result.error_code() != remote::DataStoreError::NO_ERROR)
         {
-            assert(false);
-            // Only read partial range slices info. Caller should retry.
-            LOG(ERROR) << "Fetch range slices failed: Partial result, keep "
-                          "retring";
+            // The read failed, e.g. the shard's node is restarting and brpc
+            // holds it down until its health check reconnects. The waiting
+            // requests fail with DATA_STORE_ERR and their callers retry.
+            LOG(ERROR) << "Fetch range slices failed, error: "
+                       << static_cast<int>(result.error_code()) << " "
+                       << result.error_msg() << "; the requests retry";
             fetch_req->SetFinish(txservice::CcErrorCode::DATA_STORE_ERR);
             txservice::Sharder::Instance().UnpinNodeGroupData(ng_id);
             return;

@@ -135,17 +135,27 @@ public:
     // groups on cluster scaling down.
     virtual void RemoveCcNodeGroup(uint32_t cc_node_group_id, int64_t term) = 0;
 
-    // Invoked by a failing over cc node group to replay log and notify all log
-    // groups the raft term of the group's new leader.
-    // If log_group >= 0, send ReplayLogRequest to specified log_group, else
-    // send to all log groups.
-    virtual void ReplayLog(uint32_t cc_node_group_id,
+    /**
+     * @brief Asks one log group, once, to register a failing-over node group's
+     * new term and replay its log to the node (LogAgent::ReplayLogOnce).
+     *
+     * A bounded attempt: the caller learns whether the log group got the
+     * request from the replay stream it opens, and asks again if none comes.
+     *
+     * @param cc_node_group_id The recovering node group.
+     * @param term The node group's new term.
+     * @param source_ip The address of the node's log replay service.
+     * @param source_port The port of the node's log replay service.
+     * @param log_group_id The log group.
+     * @param start_ts The commit timestamp to replay from at the latest.
+     * @return true if the log group's leader accepted the request.
+     */
+    virtual bool ReplayLog(uint32_t cc_node_group_id,
                            int64_t term,
                            const std::string &source_ip,
                            uint16_t source_port,
-                           int log_group,
-                           uint64_t start_ts,
-                           std::atomic<bool> &interrupt) = 0;
+                           uint32_t log_group_id,
+                           uint64_t start_ts) = 0;
 
     virtual RecoverTxStatus RecoverTx(uint64_t tx_number,
                                       int64_t tx_term,

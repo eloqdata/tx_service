@@ -1400,7 +1400,10 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
         // NewTx reads each ccshard's next_tx_ident_, which is set concurrently
         // by log replay thread when native cc node finishes log replay. The two
         // events are synchronized by leader_term_.
-        TEntry &tx = ccs.NewTx(tx_ng_id, log_group_id, term);
+        TEntry &tx = ccs.NewTx(tx_ng_id,
+                               log_group_id,
+                               term,
+                               iso_level == IsolationLevel::Snapshot);
         InitTxResult &init_tx_res = hres.Value();
         init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId(tx_ng_id));
         TxNumber txn = init_tx_res.txid_.TxNumber();

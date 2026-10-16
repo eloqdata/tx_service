@@ -17,7 +17,7 @@ Module-by-module design documentation for this repo, written so that an engineer
 | [09-store-handler.md](09-store-handler.md) | DataStoreHandler contract, EloqDSS service & client, RocksDB/cloud backends | `store_handler/` |
 | [10-log-service.md](10-log-service.md) | Log service (`eloq_log_service/`), braft Raft replication, LogAgent client | WAL service, log replay plumbing |
 | [standby_replication_protocol.md](standby_replication_protocol.md) | Standby replication protocol (pre-existing design doc) | standby/follower reads |
-| [range-split-schema-op-recovery.md](range-split-schema-op-recovery.md) | Recovering a range split together with a schema op: current behavior, its flaw, the deferred redesign and to-do list | schema-op or range-split replay, `ReplayLogCc::RangeSplitting` |
+| [range-split-schema-op-recovery.md](range-split-schema-op-recovery.md) | The catalog lock a recovered schema op restores, by role (coordinator, participant), and a range split in flight on the same table; the tests, a fixed loss of a split's double-written records, and the open item | schema-op or range-split replay, `ReplayLogCc::RangeSplitting` |
 
 ## Scope and exclusions
 

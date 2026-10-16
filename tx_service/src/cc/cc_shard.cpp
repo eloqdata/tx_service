@@ -855,10 +855,28 @@ void CcShard::AbortCcRequests(std::vector<CcRequestBase *> &&reqs,
 
 TEntry &CcShard::NewTx(NodeGroupId tx_ng_id,
                        uint32_t log_group_id,
-                       int64_t term)
+                       int64_t term,
+                       bool read_snapshot)
 {
     // allocate start timestamp.
     uint64_t start_ts = Now();
+    if (read_snapshot)
+    {
+        // A snapshot read must see what other nodes acknowledged before it
+        // started. The timestamp base advances from the wall clock only every
+        // 100 ms (LocalCcShards::TimerRun), while another node's commits take
+        // timestamps above its own base; so read the wall clock, and advance
+        // the base with it.
+        const uint64_t wall_ts =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        if (wall_ts > start_ts)
+        {
+            UpdateTsBase(wall_ts);
+            start_ts = wall_ts;
+        }
+    }
 
     // Cicurlar iteration to find an available transaction entry.
     size_t cnt = 0;

@@ -59,7 +59,7 @@ Writes go through braft: `WriteLog` → serialize request to IOBuf → bind to `
 | RPC | Caller | Behavior |
 |---|---|---|
 | `WriteLog(LogRequest)` | tx commit path | `LogServiceImpl` routes by `log_group_id`; `LogInstance::WriteLog` checks leadership (returns `NotLeader` if not leader), proposes via braft, waits for apply; returns `Success`/`Fail`/`NotLeader`/`Unknown` |
-| `ReplayLog(LogRequest)` | recovering cc ng leader (`LogAgent::ReplayLog`, sync, retried every 2s until `Success`) | Updates ng term + leader info in `LogState` via braft, then spawns/replaces a `LogShippingAgent` for this ng |
+| `ReplayLog(LogRequest)` | recovering cc ng leader (`LogAgent::ReplayLogOnce`: one attempt per log group, 2 s deadline), sent by the node at its leader start and again only for a log group that opened no replay stream | Updates ng term + leader info in `LogState` via braft, then spawns/replaces a `LogShippingAgent` for this ng. A request whose term is no less than the ng's current one replaces the ng's shipping: the earlier shipping stops at its next message, without its finish message, and closes its stream |
 | `UpdateCheckpointTs(LogRequest)` | checkpointer (`LogAgent::UpdateCheckpointTs`, fire-and-forget to every group) | Proposed via braft; on apply, `LogState::UpdateCkptTs` updates `last_ckpt_ts_` for the ng, recomputes `min_ckpt_ts_`, triggers `TryCleanMultiStageOps` |
 | `RecoverTx(RecoverTxRequest)` | tx hitting an orphan lock | Searches `LogState` for the tx's data/DDL/split-range/cluster-scale/cluster-gate log and the ng's current term; answers `Committed`/`NotCommitted`; ships data log asynchronously if committed |
 | `RemoveCcNodeGroup(LogRequest)` | cluster scale-in | Proposed via braft; on apply, erases ng info from `LogState` |
@@ -154,7 +154,9 @@ new cc ng leader (tx side, RecoveryService / Sharder failover)
          cluster-scale not CleanScale, then the cluster gate slot if set)
        then ship data logs: scan_threads partitions of the key range in parallel,
          each packed into ReplayMessage blobs (entry = ts ‖ ng ‖ txn ‖ len ‖ blob)
-       finally ReplayFinishMsg{log_group_id, latest_txn_no, last_ckpt_ts, latest_commit_ts}
+       finally ReplayFinishMsg{log_group_id, latest_txn_no, last_ckpt_ts, latest_commit_ts},
+         on the same stream only: a broken replay stream ends without it, and the cc node,
+         seeing no replay stream from the log group, asks for the replay again
   → tx-side RecoveryService::on_received_messages converts each record into ReplayLogCc
        requests enqueued to cc shards (see 07-durability-and-recovery.md)
 ```
@@ -162,7 +164,7 @@ new cc ng leader (tx side, RecoveryService / Sharder failover)
 Details:
 
 - `start_ts` = `last_ckpt_ts + 1` for the ng (0 if never checkpointed), honoring `req.start_ts` if set.
-- The agent is a dedicated `std::thread`; termination on replacement is polled with `std::this_thread::sleep_for(1s)` (agent thread) and checked via an atomic `shipping_agent_status_`.
+- The agent is a dedicated `std::thread`; termination on replacement is checked via an atomic `shipping_agent_status_`: a replaced agent writes no more messages (it stops at its next one, without the finish message) and closes its stream; while it is still connecting it notices within its 1 s retry sleep. The replacing request waits until the old agent has stopped.
 - Multiple simultaneous ngs can each have their own shipping agent; `LogInstance` keeps a `std::unordered_map<uint32_t, std::unique_ptr<LogShippingAgent>> log_replay_workers_` keyed by ng id.
 - The cc ng term carried in replay messages is the actual braft term from `cc_ng_info_`, not a hard-coded constant.
 

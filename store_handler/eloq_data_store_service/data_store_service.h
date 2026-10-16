@@ -651,6 +651,22 @@ public:
         return data_store_factory_.get();
     }
 
+    /**
+     * @brief Counts a write about to be submitted to the shard's store.
+     *
+     * One half of a store-then-load handshake with SwitchReadWriteToReadOnly:
+     * the writer increments ongoing_write_requests_, then loads
+     * shard_status_; the switcher stores ReadOnly, then waits for the count to
+     * reach zero. Each side must see the other's store, or a write reaches a
+     * store already switched to read-only.
+     *
+     * @param shard_id The shard.
+     * @warning The handler's shard_status_ load after this call must be
+     * seq_cst, as must the counter updates and the switcher's accesses: C++
+     * orders a store before a later load of another atomic only among
+     * seq_cst operations, and an acquire load may still return the old
+     * status.
+     */
     void IncreaseWriteReqCount(uint32_t shard_id)
     {
         data_shards_.at(shard_id).ongoing_write_requests_.fetch_add(
@@ -683,6 +699,21 @@ public:
     void ClearStandbySnapshotPayloadForEloqStore(uint32_t shard_id);
 
     void CloseDataStore(uint32_t shard_id);
+
+    /**
+     * @brief Opens a data shard read-write for the node group bound to it:
+     * the co-located mode's entry point, where data shard g opens on node
+     * group g's leader.
+     *
+     * Called in-process by the data store client (DataStoreServiceClient::
+     * OnLeaderStart, and RequestSyncSnapshot on a standby). Does nothing if
+     * the shard is not Closed.
+     *
+     * @param shard_id The data shard, equal to the node group's id.
+     * @param bucket_ids The node group's buckets, which the shard's store
+     * limits its sweeps of shared storage to (DataStore::SetPartitionBuckets).
+     * @param term The node group's leader term; 0 on a single node.
+     */
     void OpenDataStore(uint32_t shard_id,
                        std::unordered_set<uint16_t> &&bucket_ids,
                        int64_t term = 0);
@@ -753,15 +784,94 @@ private:
         }
     }
 
-    bool ConnectAndStartDataStore(uint32_t data_shard_id,
-                                  DSShardStatus open_mode,
-                                  bool create_db_if_missing = false,
-                                  int64_t term = 0);
+    /**
+     * @brief Opens one data shard's data store: moves the shard from Closed
+     * through Starting to open_mode, creating the shard's DataStore or
+     * starting the one it kept from an earlier close.
+     *
+     * Requests that meet the shard while it is Starting wait and run again
+     * once it leaves that state (RunStartingWaiters), also when the open
+     * fails and the shard goes back to Closed.
+     *
+     * @param data_shard_id The data shard.
+     * @param open_mode ReadOnly or ReadWrite; Closed does nothing.
+     * @param create_db_if_missing Whether to create the database if absent.
+     * @param term The term the store starts at (EloqStore's cloud fencing).
+     * @param partition_buckets If set, the data shard's buckets, given to
+     * the store (DataStore::SetPartitionBuckets) before every start, so that
+     * a reopen picks up the current set; nullptr leaves the store's set as
+     * it is.
+     * @return true if the shard is open in open_mode.
+     */
+    bool ConnectAndStartDataStore(
+        uint32_t data_shard_id,
+        DSShardStatus open_mode,
+        bool create_db_if_missing = false,
+        int64_t term = 0,
+        const std::unordered_set<uint16_t> *partition_buckets = nullptr);
+
+    /**
+     * @brief Puts a request that found its shard Starting on the shard's
+     * waiting list, until the shard leaves that state.
+     *
+     * A shard is Starting while it opens (its node becomes the node group's
+     * leader after a failover or a restart) and while it closes. A request
+     * arriving then waits rather than fail: once the shard is open it is
+     * served, and once it is closed it gets the sharding error and the client
+     * re-routes. No thread waits: the request sits on the list until the
+     * thread that moves the shard out of Starting runs it again
+     * (RunStartingWaiters), and its handler checks the status afresh. The
+     * handler calls this only after it has seen the shard Starting, so only a
+     * request that really waits builds retry.
+     *
+     * @param shard_id The shard.
+     * @param retry Calls the handler again with the arguments the request
+     * came with. An RPC request's controller, request and response stay valid
+     * until its closure runs: brpc's baidu_std server frees them in
+     * SendRpcResponse, which is the closure, and its HTTP server's closure
+     * owns them. A local request's arguments are the caller's, kept alive
+     * until its closure runs, as for any asynchronous request.
+     * @note If the shard has left Starting since the handler looked, retry
+     * runs here, at once.
+     */
+    void WaitWhileStarting(uint32_t shard_id, std::function<void()> retry);
+
+    /**
+     * @brief Runs again, on this thread, the requests that waited while the
+     * shard was Starting.
+     *
+     * Called right after every change of the shard's status out of Starting.
+     * A request put on the list before this call takes the list is run here;
+     * one that comes later finds the new status (it was stored before), so
+     * none is left behind. Each handler only submits its request to the data
+     * store, so this does not block.
+     *
+     * @param shard_id The shard.
+     */
+    void RunStartingWaiters(uint32_t shard_id);
 
     bool SwitchReadWriteToReadOnly(uint32_t shard_id);
     bool SwitchReadOnlyToClosed(uint32_t shard_id);
     bool SwitchReadOnlyToReadWrite(uint32_t shard_id);
     uint32_t GetReadSubmitSlotIndex();
+
+    /**
+     * @brief Marks this thread as submitting a read to the shard's store,
+     * until the returned guard is destroyed.
+     *
+     * One half of a store-then-load handshake with SwitchReadOnlyToClosed:
+     * the reader stores its window depth, then loads shard_status_; the
+     * closer stores Starting, then loads every window depth, then shuts the
+     * store down. Each side must see the other's store, or a read reaches a
+     * store being shut down.
+     *
+     * @param shard_id The shard.
+     * @return The guard that leaves the window.
+     * @warning The handler's shard_status_ load after this call must be
+     * seq_cst, as must the depth store and the closer's accesses: C++ orders
+     * a store before a later load of another atomic only among seq_cst
+     * operations, and an acquire load may still return the old status.
+     */
     ReadSubmitGuard EnterReadSubmitWindow(uint32_t shard_id);
     void LeaveReadSubmitWindow(uint32_t shard_id, uint32_t slot_idx);
     void WaitReadSubmitWindowsDrained(const DataShard &ds_ref) const;
@@ -826,6 +936,16 @@ private:
         // Whether the file cache sync is running. Used to avoid concurrent
         // local ssd file operations between db and file sync worker.
         std::atomic<bool> is_file_sync_running_{false};
+
+        /**
+         * @brief Guards starting_waiters_. Held only to add to the list or
+         * take it, never across a handler: a local request may come from a
+         * TxProcessor's stack.
+         */
+        std::mutex starting_waiters_mux_;
+        /** @brief Requests waiting while the shard is Starting
+         * (WaitWhileStarting), each a call of its handler. */
+        std::vector<std::function<void()>> starting_waiters_;
     };
 
     std::array<DataShard, kMaxShardCount> data_shards_;
