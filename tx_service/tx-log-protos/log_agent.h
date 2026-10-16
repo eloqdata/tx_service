@@ -164,6 +164,36 @@ public:
                    std::atomic<bool> &interrupt,
                    bool no_replay = false);
 
+    /**
+     * @brief Sends a ReplayLogRequest to one log group, once: looks up the
+     * group's leader (at most 1 s) and sends the request (deadline
+     * kReplayRequestTimeoutMs).
+     *
+     * A request or its reply may be lost without a trace, so the outcome
+     * proves little: false if no leader was found or no reply came, true if
+     * the leader accepted. Either way the caller learns that the log group got
+     * the request from the replay stream it opens, and asks again if none
+     * comes.
+     *
+     * @param cc_node_group_id The recovering node group.
+     * @param term The node group's new term.
+     * @param source_ip The address of the node's log replay service.
+     * @param source_port The port of the node's log replay service.
+     * @param log_group_id The log group.
+     * @param start_ts The commit timestamp to replay from at the latest (0:
+     * from the log group's last checkpoint).
+     * @return true if the log group's leader accepted the request.
+     */
+    bool ReplayLogOnce(uint32_t cc_node_group_id,
+                       int64_t term,
+                       const std::string &source_ip,
+                       uint16_t source_port,
+                       uint32_t log_group_id,
+                       uint64_t start_ts);
+
+    /** @brief The deadline of one ReplayLogOnce request, in milliseconds. */
+    static constexpr int32_t kReplayRequestTimeoutMs = 2000;
+
     /*
      * RemoveCcNodeGroup request informs all log groups of this node
      * group is removed in cluster.

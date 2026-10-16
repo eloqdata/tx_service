@@ -524,6 +524,33 @@ public:
                           int64_t standby_term,
                           bool resubscribe) override;
 
+    /**
+     * @brief Records that the node group's data shard is hosted by the given
+     * node, the group's leader at a newer term (with data shards bound to the
+     * node groups), also when that node hosted it already: the shard's
+     * version follows the term.
+     *
+     * Points the shard at that node's data store service in this client's
+     * shard map and in this process's cluster config, with the leader term as
+     * the shard's version: every node derives the same version for the same
+     * leadership, so a redirect's version compares with this node's; a
+     * version computed from this node's own view would not. The client's
+     * later requests for the shard (the metadata reads every node makes,
+     * flushes to every shard) then go there; without it, a node that does not
+     * follow the group kept sending them to the old leader, which, when down,
+     * never answers that it no longer owns the shard.
+     *
+     * Calls may arrive in any order: one whose term is below the shard's
+     * version is out-dated and changes nothing, so the newest leader stays.
+     *
+     * @param ng_id The node group, and so the data shard.
+     * @param leader_node_id The node now leading the group.
+     * @param term Its leader term, the shard's version.
+     */
+    void OnLeaderChanged(uint32_t ng_id,
+                         uint32_t leader_node_id,
+                         int64_t term) override;
+
     void OnShutdown() override;
 
     /**
@@ -912,14 +939,56 @@ private:
                                      uint32_t old_node_index,
                                      uint32_t &new_node_index);
 
+    /**
+     * @brief Whether a request whose RPC to the shard just failed is worth
+     * sending again at once.
+     *
+     * It is when the shard is now local, or when the channel to the shard's
+     * current owner is usable (brpc::Channel::CheckHealth): the owner has
+     * moved to another node, or the channel UpdateOwnerNodeIndexOfShard
+     * rebuilt reaches a different address, such as a restarted node's new IP
+     * under the same host name. It is not while brpc holds the failed
+     * connection down until its health check reconnects (up to
+     * health_check_interval seconds): an attempt then fails at once without
+     * touching the network, so the caller gets the network error now and
+     * retries on its own schedule.
+     *
+     * @param shard_id The shard.
+     * @return true if an immediate retry can reach the shard.
+     */
+    bool CanRetryShardNow(uint32_t shard_id);
+
     void UpdateShardOwner(uint32_t shard_id, uint32_t node_id);
 
     uint32_t FindFreeNodeIndex();
     void HandleShardingError(const ::EloqDS::remote::CommonResult &result);
+    /**
+     * @brief Points the client's requests for a shard at the node hosting it
+     * when the given shard version is newer than the one held, or, with
+     * move_if_owner_differs, when it is the same and the node differs.
+     *
+     * The shard's node slot is replaced by a fresh one with a channel to the
+     * new host and the given version. A version below the held one never
+     * moves the shard; one at it, with the same host, changes nothing. The
+     * check reads the held slot inside the move, which another mover cannot
+     * replace meanwhile, so concurrent moves leave the newest version.
+     *
+     * @param shard_id The shard.
+     * @param shard_version The version to install.
+     * @param host_name The host of the shard's data store service.
+     * @param port Its port.
+     * @param move_if_owner_differs Also move at the held version when only
+     * the host differs: for a leader learned from the tx service, which
+     * names the host of its term.
+     * @return false if another thread is moving the shard or no node slot is
+     * free, so that the caller tries again; true otherwise, also when nothing
+     * needed moving.
+     */
     bool UpgradeShardVersion(uint32_t shard_id,
                              uint64_t shard_version,
                              const std::string &host_name,
-                             uint16_t port);
+                             uint16_t port,
+                             bool move_if_owner_differs = false);
 
     txservice::EloqHashCatalogFactory hash_catalog_factory_{};
     txservice::EloqRangeCatalogFactory range_catalog_factory_{};

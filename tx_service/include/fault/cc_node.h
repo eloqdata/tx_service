@@ -104,7 +104,9 @@ public:
     bool PromoteStandbyTermIfCandidate(int64_t standby_term);
 
 private:
-    void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
+    void NotifyNewLeaderStart(uint32_t leader_ng_id,
+                              uint32_t leader_node_id,
+                              int64_t term);
     void SubscribePrimaryNode(uint32_t node_id, int64_t term, bool resubscribe);
     void ClearCcNodeGroupData();
     bool WaitForShardSyncWithRetry(const size_t shard_idx,

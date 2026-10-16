@@ -23,6 +23,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -220,8 +221,40 @@ public:
     }
 
 private:
+    /**
+     * @brief Arms the faults the environment variable ELOQ_DSS_FAULT_INJECT
+     * names, in fault-injection builds: comma-separated entries, each "name"
+     * or "name:params" (params as InjectFault takes them). For tests that
+     * need a fault from the process's start, before its RPC serves; the RPC
+     * removes it as any other.
+     */
     FaultInject()
     {
+#ifdef WITH_FAULT_INJECT
+        const char *faults = std::getenv("ELOQ_DSS_FAULT_INJECT");
+        std::string spec = faults == nullptr ? "" : faults;
+        size_t begin = 0;
+        while (begin < spec.size())
+        {
+            size_t end = spec.find(',', begin);
+            if (end == std::string::npos)
+            {
+                end = spec.size();
+            }
+            std::string item = spec.substr(begin, end - begin);
+            size_t colon = item.find(':');
+            std::string name = item.substr(0, colon);
+            std::string paras =
+                colon == std::string::npos ? "" : item.substr(colon + 1);
+            if (!name.empty())
+            {
+                LOG(INFO) << "FaultInject from ELOQ_DSS_FAULT_INJECT, name="
+                          << name << "  paras=" << paras;
+                injected_fault_map_.try_emplace(name, FaultEntry(name, paras));
+            }
+            begin = end + 1;
+        }
+#endif
     }
 
     ~FaultInject()

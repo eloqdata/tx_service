@@ -4539,20 +4539,18 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                  wset_entry.forward_addr_)
             {
                 // If the wset entry needs to be double written into different
-                // ngs, write log for both ngs.
+                // ngs, write log for both ngs: every such key of the tx goes
+                // into the other ng's blob, which is all that ng's recovery
+                // has of it until that ng checkpoints it (a range split moving
+                // the key to that ng).
                 uint32_t forward_ng_id =
                     Sharder::Instance().ShardToCcNodeGroup(forward_shard_code);
-                auto [table_rec_it, inserted] =
-                    ng_table_set.try_emplace(forward_ng_id);
-                if (!inserted)
-                {
-                    continue;
-                }
+                auto table_rec_it = ng_table_set.try_emplace(forward_ng_id);
                 std::unordered_map<
                     TableName,
                     std::vector<
                         std::pair<const TxKey *, const WriteSetEntry *>>>
-                    &table_rec_set = table_rec_it->second.second;
+                    &table_rec_set = table_rec_it.first->second.second;
 
                 auto rec_vec_it = table_rec_set.emplace(
                     std::piecewise_construct,
@@ -4560,7 +4558,18 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                                           table_name.Type(),
                                           table_name.Engine()),
                     std::forward_as_tuple());
-                rec_vec_it.first->second.emplace_back(&write_key, &wset_entry);
+                std::vector<std::pair<const TxKey *, const WriteSetEntry *>>
+                    &rec_vec = rec_vec_it.first->second;
+                // A key double written to several cores of one ng is logged
+                // there once. The key's own ng and its forward ngs all get it
+                // in this pass alone, so an ng that has it already has it
+                // last: its own ng, or a forward ng an earlier forward
+                // address of the key named.
+                if (!rec_vec.empty() && rec_vec.back().first == &write_key)
+                {
+                    continue;
+                }
+                rec_vec.emplace_back(&write_key, &wset_entry);
             }
         }
     }

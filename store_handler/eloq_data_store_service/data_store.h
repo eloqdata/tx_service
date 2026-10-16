@@ -26,6 +26,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 namespace EloqDS
 {
@@ -157,6 +158,26 @@ public:
     {
         (void) term;
         (void) tag;
+    }
+
+    /**
+     * @brief Sets the buckets of the data shard this store serves.
+     *
+     * DataStoreService::ConnectAndStartDataStore calls it before each start
+     * of the store, with the buckets of the node group that owns the data
+     * shard. A store whose storage also holds other data shards' partitions
+     * (EloqStore keeps every data shard's partitions under one path) limits
+     * the operations that sweep its storage to these buckets. A store that
+     * has a database of its own per data shard (RocksDB, RocksDB-Cloud)
+     * ignores it.
+     *
+     * @param bucket_ids The data shard's buckets; empty means every partition
+     * belongs to the data shard.
+     */
+    virtual void SetPartitionBuckets(
+        const std::unordered_set<uint16_t> &bucket_ids)
+    {
+        (void) bucket_ids;
     }
 
     /**

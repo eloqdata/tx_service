@@ -28,6 +28,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -356,22 +357,28 @@ public:
     /**
      * @brief When a remote cc node group fails over, this node is unaware of
      * the new leader. Its cc requests are directed to a non-leader node and
-     * return with errors. The method updates the leader of the input cc node
-     * group in the local cache.
+     * return with errors. The method asks the host manager for the leader of
+     * the input cc node group, then that node for its term (the host manager
+     * answers from braft's leader lookup, which has none), and updates the
+     * local cache with both. A node that no longer leads the group answers no
+     * term, and the lookup changes nothing.
      *
      * @param ng_id The cc node group ID.
      */
     void UpdateLeader(uint32_t ng_id);
 
     /**
-     * @brief NotifyNewLeaderStart rpc will send the node_id of the new leader
-     * to each node. Update the leader cache without referring to hm service.
+     * @brief Updates the leader cache with a leader and its term: from the
+     * host manager's NotifyNewLeaderStart rpc, a log write's reply, or a
+     * lookup (UpdateLeader(ng_id)). An update at or below the newest term
+     * learned here is out-dated and skipped, so updates that arrive in any
+     * order leave the newest leader cached.
      *
      * @param ng_id The cc node group ID.
      * @param node_id The node_id of leader.
      * @param term The node group leader term.
      */
-    void UpdateLeader(uint32_t ng_id, uint32_t node_id, int64_t term = -1);
+    void UpdateLeader(uint32_t ng_id, uint32_t node_id, int64_t term);
 
     bool OnLeaderStart(uint32_t ng_id,
                        int64_t term,
@@ -446,6 +453,23 @@ public:
     bool CheckLogGroupReplayFinished(uint32_t cc_ng_id,
                                      uint32_t log_group_id,
                                      int64_t cc_ng_term);
+
+    /**
+     * @brief Asks every log group to replay a node group's log to this node,
+     * which has just become the node group's candidate leader.
+     *
+     * The node asks once, at its leader start (CcNode::OnLeaderStart); the
+     * log replay service then asks again only for a log group that has not
+     * answered (RecoveryService). Does nothing without a log service.
+     *
+     * @param cc_ng_id The node group.
+     * @param cc_ng_term The node group's new term.
+     * @param replay_start_ts The commit timestamp to replay from at the
+     * latest (0: from the log group's last checkpoint).
+     */
+    void RequestLogReplay(uint32_t cc_ng_id,
+                          int64_t cc_ng_term,
+                          uint64_t replay_start_ts);
 
     /**
      * @brief Wait for all the tx_service nodes to finish the log recovery
@@ -785,6 +809,18 @@ private:
     inline void RebalanceNgMembers(
         std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs);
 
+    /**
+     * @brief Asks a node for its leader term of a node group: this node's own
+     * terms when it is the node, else its FetchNodeInfo rpc.
+     *
+     * @param ng_id The cc node group ID.
+     * @param node_id The node a lookup named as the group's leader.
+     * @return The node's leader term of the group (its candidate term while
+     * it replays the log), or -1 if it does not lead the group or did not
+     * answer.
+     */
+    int64_t FetchLeaderTerm(uint32_t ng_id, uint32_t node_id);
+
 private:
     uint32_t node_id_;
     uint32_t native_ng_;
@@ -801,11 +837,20 @@ private:
     // The replicate number of node group.
     uint16_t rep_group_cnt_;
 
+    /**
+     * @brief Serializes the updates of the leader cache below, so that a node
+     * group's leader and term change together; readers of ng_leader_cache_
+     * take no lock.
+     */
+    std::mutex ng_leader_mux_;
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
     std::atomic<uint32_t> ng_leader_cache_[1000];
-    // Ng leader term cache. Note this is not reliable.
-    std::atomic<int64_t> ng_leader_term_cache_[1000];
+    /**
+     * @brief Per node group, the term of the cached leader, the newest learned
+     * here (-1: none yet). Under ng_leader_mux_.
+     */
+    int64_t ng_leader_term_cache_[1000];
 
     std::atomic<int64_t> leader_term_cache_[1000];
     std::atomic<int64_t> candidate_leader_term_cache_[1000];

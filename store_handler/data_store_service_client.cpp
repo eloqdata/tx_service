@@ -25,6 +25,7 @@
 #include <bthread/mutex.h>
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <boost/lexical_cast.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
@@ -4132,13 +4133,105 @@ void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
     DLOG(INFO) << "UpdatePrimaryNode, dss_shard_id: " << dss_shard_id
                << ", DSSNode: " << dss_leader_node.host_name_ << ":"
                << dss_leader_node.port_;
-    // Pump the dss shard version
+    // The shard's version is the leader term it is hosted under: the one
+    // number every node derives for this leadership, so that versions from
+    // different nodes compare. Never lowered.
     cluster_manager.UpdateDSShardVersion(
-        dss_shard_id, cluster_manager.FetchDSShardVersion(dss_shard_id) + 1);
+        dss_shard_id,
+        std::max<uint64_t>(cluster_manager.FetchDSShardVersion(dss_shard_id),
+                           static_cast<uint64_t>(term)));
     // Update the client config
     SetupConfig(cluster_manager);
 
     Connect();
+}
+
+void DataStoreServiceClient::OnLeaderChanged(uint32_t ng_id,
+                                             uint32_t leader_node_id,
+                                             int64_t term)
+{
+    if (!bind_data_shard_with_ng_)
+    {
+        return;
+    }
+    const uint32_t shard_id = ng_id;
+    if (shard_id >= dss_shards_.size())
+    {
+        LOG(ERROR) << "OnLeaderChanged: shard_id " << shard_id
+                   << " exceeds array bounds";
+        return;
+    }
+
+    auto ng_configs = txservice::Sharder::Instance().GetNodeGroupConfigs();
+    auto ng_config_it = ng_configs.find(shard_id);
+    if (ng_config_it == ng_configs.end())
+    {
+        LOG(WARNING) << "OnLeaderChanged: no config for node group " << ng_id;
+        return;
+    }
+    const txservice::NodeConfig *leader_config = nullptr;
+    for (const auto &node_config : ng_config_it->second)
+    {
+        if (node_config.node_id_ == leader_node_id)
+        {
+            leader_config = &node_config;
+            break;
+        }
+    }
+    if (leader_config == nullptr)
+    {
+        LOG(WARNING) << "OnLeaderChanged: node " << leader_node_id
+                     << " is not a member of node group " << ng_id;
+        return;
+    }
+    const std::string &host_name = leader_config->host_name_;
+    const uint16_t port = TxPort2DssPort(leader_config->port_);
+
+    // The shard's version is the leader term it is hosted under: every node
+    // derives the same number for the same leadership, so a redirect's
+    // version compares with this node's. Calls arrive in any order; one whose
+    // term is below the shard's version is out-dated and moves nothing.
+    if (term < 0)
+    {
+        LOG(WARNING) << "OnLeaderChanged: no term for node " << leader_node_id
+                     << " leading node group " << ng_id << "; shard kept";
+        return;
+    }
+    const uint64_t version = static_cast<uint64_t>(term);
+    const uint64_t current_version =
+        dss_nodes_[dss_shards_[shard_id].load(std::memory_order_acquire)]
+            .ShardVersion();
+    if (version < current_version)
+    {
+        LOG(INFO) << "Data shard " << shard_id << " stays: node "
+                  << leader_node_id << " leads node group " << ng_id
+                  << " at term " << term << ", below the shard's version "
+                  << current_version;
+        return;
+    }
+    if (data_store_service_ != nullptr)
+    {
+        // Keep this node's data store service's view, which answers
+        // misrouted requests, in line.
+        data_store_service_->GetClusterManager().UpdatePrimaryNodeIfNotOlder(
+            shard_id, DSSNode(host_name, port), version);
+    }
+    for (int attempt = 0; attempt < 100; ++attempt)
+    {
+        // Checks the version again against the slot it replaces.
+        if (UpgradeShardVersion(shard_id, version, host_name, port, true))
+        {
+            LOG(INFO) << "Data shard " << shard_id
+                      << " now at its node group's "
+                      << "leader, node " << leader_node_id << " (" << host_name
+                      << ":" << port << "), shard version " << version;
+            return;
+        }
+        // Another thread is moving the shard; try again.
+        bthread_usleep(1000);
+    }
+    LOG(ERROR) << "Could not move data shard " << shard_id << " to node "
+               << leader_node_id << " (" << host_name << ":" << port << ")";
 }
 
 /**
@@ -4499,6 +4592,23 @@ bool DataStoreServiceClient::UpdateOwnerNodeIndexOfShard(
     }
 }
 
+bool DataStoreServiceClient::CanRetryShardNow(uint32_t shard_id)
+{
+    if (IsLocalShard(shard_id))
+    {
+        return true;
+    }
+    const uint32_t node_index = GetOwnerNodeIndexOfShard(shard_id);
+    if (node_index >= dss_nodes_.size())
+    {
+        return false;
+    }
+    // brpc::Channel overrides CheckHealth() as protected; ChannelBase
+    // declares it public.
+    brpc::ChannelBase *channel = dss_nodes_[node_index].Channel();
+    return channel->CheckHealth() == 0;
+}
+
 uint32_t DataStoreServiceClient::FindFreeNodeIndex()
 {
     uint64_t current_ts =
@@ -4558,7 +4668,8 @@ void DataStoreServiceClient::HandleShardingError(
 bool DataStoreServiceClient::UpgradeShardVersion(uint32_t shard_id,
                                                  uint64_t shard_version,
                                                  const std::string &host_name,
-                                                 uint16_t port)
+                                                 uint16_t port,
+                                                 bool move_if_owner_differs)
 {
     if (shard_id >= dss_shards_.size())
     {
@@ -4568,7 +4679,14 @@ bool DataStoreServiceClient::UpgradeShardVersion(uint32_t shard_id,
 
     uint32_t node_index = dss_shards_[shard_id].load(std::memory_order_acquire);
     auto &node_ref = dss_nodes_[node_index];
-    if (node_ref.ShardVersion() < shard_version)
+    const uint64_t held_version = node_ref.ShardVersion();
+    // Never lowered: a move at an older version changes nothing. Claiming the
+    // held slot below fails if another mover replaced it after this check,
+    // and the caller checks again.
+    const bool owner_differs =
+        move_if_owner_differs && shard_version == held_version &&
+        (node_ref.HostName() != host_name || node_ref.Port() != port);
+    if (held_version < shard_version || owner_differs)
     {
         uint64_t expect_val = 0;
         uint64_t current_ts =

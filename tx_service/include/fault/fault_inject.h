@@ -211,9 +211,19 @@ public:
     static bool CompiledIn();
 
 private:
-    FaultInject()
-    {
-    }
+    /**
+     * @brief Arms the faults the environment variable ELOQ_TX_FAULT_INJECT
+     * names, in fault-injection builds: comma-separated entries, each "name"
+     * or "name:params" (params as InjectFault takes them). For tests that need
+     * a fault from the process's start, before it serves commands that arm
+     * one; such a command removes it as any other.
+     *
+     * @note Defined in fault_inject.cpp, which the data substrate compiles
+     * with its WITH_FAULT_INJECT: an API layer that includes this header is
+     * built without it, and an inline definition compiled there could be the
+     * one the linker keeps.
+     */
+    FaultInject();
 
     ~FaultInject()
     {

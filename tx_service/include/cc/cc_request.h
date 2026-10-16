@@ -4921,6 +4921,14 @@ public:
         return range_split_started_;
     }
 
+    /**
+     * @brief Whether a split of the table that the recovering node group
+     * coordinates is in flight: it holds the table's catalog read lock on this
+     * node group, so no schema op holds the table's write lock here.
+     *
+     * @param table_name The base table.
+     * @return true if such a split is in flight.
+     */
     bool RangeSplitting(const TableName &table_name) const
     {
         return range_splitting_ &&

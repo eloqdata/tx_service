@@ -425,6 +425,20 @@ public:
     void UpdatePrimaryNode(uint32_t shard_id, const DSSNode &node);
 
     /**
+     * @brief Records a shard's primary node and version together, unless the
+     * version is below the shard's current one: a primary learned for an
+     * older version is out-dated.
+     *
+     * @param shard_id The shard.
+     * @param node Its primary node.
+     * @param shard_version The version that primary hosts the shard under.
+     * @return true if recorded.
+     */
+    bool UpdatePrimaryNodeIfNotOlder(uint32_t shard_id,
+                                     const DSSNode &node,
+                                     uint64_t shard_version);
+
+    /**
      * @brief Returns if this node is the owner of a specific node group.
      */
     bool IsOwnerOfShard(uint32_t shard_id, uint64_t *shard_version = nullptr);

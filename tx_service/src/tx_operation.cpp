@@ -145,8 +145,13 @@ void ReadOperation::Forward(TransactionExecution *txm)
     {
         if (!read_tx_req_->read_local_)
         {
-            // Just returned from lock_bucket_op_, check lock_bucket_result_.
-            assert(lock_range_bucket_result_->IsFinished());
+            // Back from lock_range_op_ or lock_bucket_op_, or from the wait
+            // before a retry (ReRunOp). A hash-partitioned key whose bucket
+            // was already known (FastToGetBucket) runs no lock op, so a retry
+            // of its read finds the lock result still reset: neither finished
+            // nor errored, and Process() looks the bucket up again.
+            assert(lock_range_bucket_result_->IsFinished() ||
+                   read_tx_req_->tab_name_->IsHashPartitioned());
             if (lock_range_bucket_result_->IsError())
             {
                 // There is an error when getting the input key's bucket or
@@ -7455,7 +7460,13 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-        assert(lock_range_bucket_result_->IsFinished());
+        // Back from lock_range_op_, or from the wait before a retry
+        // (ReRunOp). A hash-partitioned batch whose buckets were all already
+        // known (FastToGetBucket) runs no lock op, so a retry finds the lock
+        // result still reset: neither finished nor errored, and every key's
+        // node group already set (lock_index_ is at the end).
+        assert(lock_range_bucket_result_->IsFinished() ||
+               batch_read_tx_req_->tab_name_->IsHashPartitioned());
         std::vector<ScanBatchTuple> &read_batch =
             batch_read_tx_req_->read_batch_;
 

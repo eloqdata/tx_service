@@ -176,7 +176,22 @@ private:
     std::chrono::system_clock::time_point last_checkpoint_ts_;
     std::atomic<std::chrono::system_clock::time_point>
         last_checkpoint_request_ts_;
-    uint32_t ckpt_delay_time_;  // unit: Microsecond
+    /**
+     * @brief The most a round's checkpoint timestamp is lowered below the
+     * round's timestamp under MVCC, in microseconds: the
+     * checkpointer_delay_seconds setting (5 s by default).
+     *
+     * A round at timestamp T checkpoints at T when no snapshot transaction
+     * started below T, else at the oldest one's start, but never below T
+     * minus this delay (GetNewCheckpointTs). Entries updated above the
+     * checkpoint stay dirty, and the page cleaner evicts only checkpointed
+     * entries (CcEntry::IsFree), so they stay in memory with their version
+     * chains: a snapshot read in that window finds its version there instead
+     * of fetching it from the archives table. It is a cache residency choice
+     * only; recycling old versions follows the oldest snapshot transaction's
+     * start alone (CcEntry::KickOutArchiveRecords).
+     */
+    uint32_t ckpt_delay_time_;
     std::atomic<uint64_t> ongoing_data_sync_cnt_{0};
     TxService *tx_service_;
     TxLog *log_agent_;

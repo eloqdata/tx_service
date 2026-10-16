@@ -200,11 +200,17 @@ bool CcNode::UpdateCkptTs(uint64_t new_ckpt_ts)
  * @brief Notify all the nodes that the node_id of the new leader in node
  * group leader_ng_id, and request these nodes to update their leader cache.
  *
- * @param leader_ng_id
- * @param leader_node_id
+ * @note No caller: the host manager sends the notification
+ * (CcRpcService::NotifyNewLeaderStart). A leader update always carries its
+ * term, which orders it against the others.
+ *
+ * @param leader_ng_id The node group.
+ * @param leader_node_id Its new leader.
+ * @param term The new leader's term.
  */
 void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
-                                  uint32_t leader_node_id)
+                                  uint32_t leader_node_id,
+                                  int64_t term)
 {
     auto all_nodes = Sharder::Instance().GetAllNodesConfigs();
 
@@ -212,7 +218,8 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
     {
         if (node_id == leader_node_id)
         {
-            Sharder::Instance().UpdateLeader(leader_ng_id, leader_node_id);
+            Sharder::Instance().UpdateLeader(
+                leader_ng_id, leader_node_id, term);
             continue;
         }
 
@@ -232,6 +239,7 @@ void CcNode::NotifyNewLeaderStart(uint32_t leader_ng_id,
         remote::NotifyNewLeaderStartRequest req;
         req.set_ng_id(leader_ng_id);
         req.set_node_id(leader_node_id);
+        req.set_term(term);
         remote::NotifyNewLeaderStartResponse res;
         res.set_error(false);
 
@@ -479,6 +487,10 @@ bool CcNode::OnLeaderStart(int64_t term,
         local_cc_shards_.store_hd_->RestoreTxCache(ng_id_, term);
     }
 
+    // Ready to replay: ask the log groups to ship this term's log. Only this
+    // node asks; the log replay service asks again for a log group that does
+    // not answer.
+    Sharder::Instance().RequestLogReplay(ng_id_, term, replay_start_ts);
     return true;
 }
 

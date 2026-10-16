@@ -295,6 +295,28 @@ private:
      */
     void RetryKvStep(TransactionExecution *txm, TransactionOperation *step);
 
+    /**
+     * @brief Fault-injection hold (alter_table_index_hold_before_commit_lock):
+     * keeps an add index whose build has finished, after its last prepare data
+     * log, from taking its commit-stage write locks until the test disarms the
+     * hold, or for hold_s seconds (the fault's parameter "hold_s=N", 60 by
+     * default), still holding the cluster config read lock it took first.
+     * Arms the alter_table_index_held_before_commit_lock marker while it
+     * holds, so a test can tell the op got there.
+     *
+     * The wait is kv_retry_wait_op_'s blocking work on a worker thread, and
+     * the op's kv_retry_wait_op_ stage then runs acquire_all_lock_op_, so the
+     * TxProcessor keeps serving other requests meanwhile. Only fault-injection
+     * builds call it.
+     *
+     * @warning While the fault is armed it holds every add index of any table
+     * that finishes its build. A test arms it only around the one build it
+     * means to hold and disarms it in a finally.
+     *
+     * @param txm The coordinating tx.
+     */
+    void HoldBeforeCommitLock(TransactionExecution *txm);
+
     // Flush pk or sk data from ccmap into data store.
     void FlushDataIntoDataStore(const TableName &table_name,
                                 NodeGroupId ng_id,

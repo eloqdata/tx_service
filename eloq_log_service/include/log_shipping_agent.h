@@ -136,12 +136,20 @@ public:
                         finish_msg->set_last_ckpt_ts(last_ckpt_ts_);
 
                         int eagain = 0;
-                        if (SendMessage(replay_msg, iobuf_, true, eagain) != 0)
+                        // Not on a new stream: the finish message vouches for
+                        // the records sent before it on this one, which a
+                        // broken stream may have lost. Without it the cc node
+                        // asks for the replay again and gets all of it.
+                        if (SendMessage(replay_msg, iobuf_, false, eagain) != 0)
                         {
                             // interrupted or stream invalid
-                            LOG(ERROR) << "log group " << log_group_id_
-                                       << " faild to send finish message to cc"
-                                       << " node group " << cc_node_group_id_;
+                            LOG(ERROR)
+                                << "log group " << log_group_id_
+                                << " faild to send finish message to cc"
+                                << " node group " << cc_node_group_id_
+                                << " term " << cc_node_group_term_
+                                << (IsTerminating() ? ": the agent was replaced"
+                                                    : "");
                             brpc::StreamClose(stream_id_);
                             shipping_agent_status_.store(
                                 Status::Terminated, std::memory_order_release);
@@ -244,6 +252,17 @@ public:
     [[nodiscard]] int64_t NodeGroupTerm() const
     {
         return cc_node_group_term_;
+    }
+
+    /**
+     * @brief Whether Terminate() was called (or the agent stopped on its own):
+     * the agent ships nothing more, skips the finish message and closes its
+     * stream.
+     */
+    [[nodiscard]] bool IsTerminating() const
+    {
+        return shipping_agent_status_.load(std::memory_order_acquire) !=
+               Status::Active;
     }
 
 private:
@@ -505,6 +524,19 @@ private:
                     for (iterator->SeekToFirst(i); iterator->Valid(i);
                          iterator->Next(i))
                     {
+                        if (IsTerminating())
+                        {
+                            // Replaced by another agent for this cc node
+                            // group. SendMessage already writes nothing more;
+                            // this stops the reading too: the loop sends only
+                            // when a batch of this cc node group's records
+                            // fills, so it may read far between sends, and
+                            // the replacing request waits for this agent to
+                            // stop in the log group's apply loop.
+                            data_log_send_err.store(ECANCELED,
+                                                    std::memory_order_relaxed);
+                            return;
+                        }
                         cnt++;
                         const Item &item = iterator->GetItem(i);
                         if (item.item_type_ == LogItemType::DataLog)
@@ -585,6 +617,15 @@ private:
                     bool reconnect_if_fail,
                     int &eagain)
     {
+        if (IsTerminating())
+        {
+            // Replaced by another agent for this cc node group, which ships
+            // from the start: nothing more goes out on this stream. Every
+            // message passes here (the replay's batches, its DDL and finish
+            // messages, lock-recovery records), so this alone keeps a replaced
+            // agent silent.
+            return ECANCELED;
+        }
         buf.clear();
         butil::IOBufAsZeroCopyOutputStream wrapper(&buf);
         msg.SerializeToZeroCopyStream(&wrapper);

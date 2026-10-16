@@ -354,7 +354,6 @@ public:
     void InitLogAgent(std::vector<std::string> &ip_list,
                       std::vector<uint16_t> &port_list,
                       uint32_t log_group_replica_num);
-    void NotifyLogReplay(uint32_t ng_id, int64_t term, uint64_t start_ts);
     void NotifyNewLeaderStart(uint32_t ng_id, int64_t term);
     int GetLeader(uint32_t ng_id);
     void UpdateClusterConfig(

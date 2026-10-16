@@ -522,8 +522,18 @@ public:
     /**
      * @brief Find an available TEntry in tranaction array and initialize it.
      *
+     * @param tx_ng_id The node group the transaction belongs to.
+     * @param log_group_id The transaction's log group.
+     * @param term The node group's term.
+     * @param read_snapshot Whether the transaction reads a snapshot at its
+     * start timestamp (snapshot isolation): its start timestamp is then no
+     * older than the wall clock, which also advances the timestamp base.
+     * @return The transaction's entry.
      */
-    TEntry &NewTx(NodeGroupId tx_ng_id, uint32_t log_group_id, int64_t term);
+    TEntry &NewTx(NodeGroupId tx_ng_id,
+                  uint32_t log_group_id,
+                  int64_t term,
+                  bool read_snapshot = false);
 
     /**
      * @brief Find an available NonBlockingLock in lock array and initialize it.

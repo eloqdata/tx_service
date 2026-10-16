@@ -560,6 +560,19 @@ void DataStoreServiceClusterManager::UpdatePrimaryNode(uint32_t shard_id,
     topology_.UpdatePrimaryNode(shard_id, node);
 }
 
+bool DataStoreServiceClusterManager::UpdatePrimaryNodeIfNotOlder(
+    uint32_t shard_id, const DSSNode &node, uint64_t shard_version)
+{
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    if (shard_version < topology_.FetchDSShardVersion(shard_id))
+    {
+        return false;
+    }
+    topology_.UpdatePrimaryNode(shard_id, node);
+    topology_.UpdateDSShardVersion(shard_id, shard_version);
+    return true;
+}
+
 std::shared_ptr<brpc::Channel>
 DataStoreServiceClusterManager::GetDataStoreServiceChannelByPartitionId(
     uint32_t partition_id)
