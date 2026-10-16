@@ -35,7 +35,8 @@ checkpoint, replay, transaction-recovery, and membership operations through the
 The log service may be started in process by Data Substrate or reached through
 configured external endpoints. Both modes use the same protobuf and `LogAgent`
 boundary. A log group is an independent braft replication group and therefore
-an independent availability and throughput unit.
+an independent availability and throughput unit. The in-process service also
+maintains recovery metadata when transaction WAL is disabled.
 
 Each transaction writes its durable record to one selected log group, even when
 its affected data spans several CC NGs. Consequently, recovery of one CC NG
@@ -91,10 +92,24 @@ to distinguish an uncommitted transaction from a committed one. For a committed
 transaction it can stream the relevant record back for lock-scoped replay;
 without conclusive evidence, the tx side retains the lock and retries later.
 
-Raft snapshots preserve the log state machine's control and recovery metadata
-across restart. Persistent data logs remain governed by `LogState`; snapshot
-installation and backend reopening must reconstruct a coherent term,
-checkpoint, and staged-operation view before the replica serves as leader.
+Raft snapshots preserve the log state machine's control and recovery metadata,
+including when transaction WAL is disabled. Local RocksDB snapshots include a
+checkpoint of the data logs even for an empty database, and restore uses that
+checkpoint together with the metadata. Snapshot installation and backend
+reopening reconstruct a coherent term, checkpoint, and staged-operation view
+before the replica serves as leader.
+
+Snapshot metadata is captured on the serialized state machine, then filesystem
+work runs on a dedicated pthread. Captured state remains owned until the worker
+finishes cleanup, before braft completion permits another snapshot or node
+shutdown to finish. Braft retains responsibility for snapshot finalization.
+
+An application snapshot is publishable only after its complete file set is
+written and registered; local RocksDB metadata and directory entries are synced
+before publication. Failed application attempts leave the previous snapshot
+intact and allow the node to keep serving and retry. They use a non-fatal braft
+status; braft's own storage or publication failures may still disable the
+replica until restart or recreation.
 
 ## Cross-cutting invariants
 
@@ -118,4 +133,4 @@ checkpoint, and staged-operation view before the replica serves as leader.
 | WAL, replay, checkpoint, recovery, and staged-operation wire contracts are defined in protobuf | `tx_service/tx-log-protos/log.proto` |
 | Replay records are selected and shipped back to tx recovery services | `eloq_log_service/include/log_shipping_agent.h`; `eloq_log_service/src/log_instance.cpp`; `tx_service/src/fault/log_replay_service.cpp` |
 | Startup selects in-process or external log-service deployment | `core/src/log_init.cpp`; `build_eloq_log_service.cmake`; `CMakeLists.txt` |
-| Replicated writes and replay behavior have focused service tests | `eloq_log_service/test/write_log_test.cpp`; `eloq_log_service/test/async_write_log_test.cpp`; `eloq_log_service/test/rocksdb_test.cpp`; `eloq_log_service/test/log_server_rocksdb_cloud_tests.cpp` |
+| Replicated writes, replay and snapshot recovery have focused service tests | `eloq_log_service/test/write_log_test.cpp`; `eloq_log_service/test/async_write_log_test.cpp`; `eloq_log_service/test/rocksdb_test.cpp`; `eloq_log_service/test/log_server_rocksdb_cloud_tests.cpp`; `eloq_log_service/test/log_snapshot_test.cpp`; `eloq_log_service/test/log_snapshot_stream_test.cpp` |

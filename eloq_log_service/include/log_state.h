@@ -945,7 +945,8 @@ public:
 
     /**
      * write snapshot files to snapshot_path and return the filenames in
-     * relative path
+     * relative path. An empty result indicates failure; a successful snapshot
+     * always contains the metadata file, even if there are no data logs.
      */
     virtual std::vector<std::string> WriteSnapshot(
         const std::string &snapshot_path) = 0;

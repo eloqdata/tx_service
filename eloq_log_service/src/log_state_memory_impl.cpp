@@ -115,7 +115,14 @@ std::vector<std::string> LogStateMemoryImpl::WriteSnapshot(
         std::ofstream os(path.c_str(), std::ios::binary);
         WriteSnapshotNgInfoAndCatalogOpsTo(os);
         WriteSnapshotStatesTo(os);
-    }  // close file
+        // Check after close as well: buffered output may fail during flush.
+        os.close();
+        if (!os)
+        {
+            LOG(ERROR) << "Failed to write snapshot: " << path;
+            return {};
+        }
+    }
     return std::vector<std::string>{"data"};
 }
 

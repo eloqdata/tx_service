@@ -26,6 +26,7 @@ message(NOTICE "log_service source dir: ${LOG_SOURCE_DIR}")
 
 option(TEST_LOG_SERVICE "Test log service" ON)
 message(NOTICE "TEST_LOG_SERVICE : ${TEST_LOG_SERVICE}")
+option(TEST_LOG_SNAPSHOT "Build log snapshot tests (requires Catch2)" OFF)
 
 option(BRPC_WITH_GLOG "With glog" ON)
 message(NOTICE "BRPC_WITH_GLOG : ${BRPC_WITH_GLOG}")
@@ -334,6 +335,11 @@ list(APPEND LOG_INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini)
 target_include_directories(logservice PUBLIC ${LOG_INCLUDE_DIR})
 
 target_link_libraries(logservice PUBLIC ${LOG_LIB})
+
+if (TEST_LOG_SNAPSHOT)
+    enable_testing()
+    add_subdirectory(test/snapshot)
+endif ()
 
 if (TEST_LOG_SERVICE)
     add_executable(launch_sv ${LOG_SOURCE_DIR}/src/launch_sv.cpp)

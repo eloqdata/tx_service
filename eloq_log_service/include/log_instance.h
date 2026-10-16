@@ -605,19 +605,41 @@ private:
                             LogResponse *response);
 };
 
+/**
+ * Owns the captured snapshot until its worker finishes.
+ *
+ * The referenced state, writer, and completion belong to the LogInstance and
+ * braft and outlive this task because Node::join waits for the completion
+ * callback. Every pointer defaults to null so that a closure destroyed before
+ * on_snapshot_save finished wiring it is harmless.
+ */
 struct SnapshotClosure
 {
-    LogState *log_state_ref;
-    LogInstance *log_instance_ref;
-    braft::SnapshotWriter *writer;
-    braft::Closure *done;
+    /**
+     * Releases the captured snapshot state, if any was attached.
+     * @note Runs before the completion is notified: completion permits another
+     * snapshot or destruction of the LogInstance after node join.
+     */
+    ~SnapshotClosure()
+    {
+        if (log_state_ref != nullptr)
+        {
+            log_state_ref->CleanSnapshotState();
+        }
+    }
+
+    LogState *log_state_ref{nullptr};        ///< state being snapshotted
+    LogInstance *log_instance_ref{nullptr};  ///< owning raft state machine
+    braft::SnapshotWriter *writer{nullptr};  ///< braft's writer for this save
+    braft::Closure *done{nullptr};           ///< braft's completion callback
 #if defined(LOG_STATE_TYPE_RKDB_CLOUD)
-    // copy the dbc_ from log_state at the time of on_snapshot_save to prevent
-    // leader step down during the save_snapshot
+    /**
+     * Copy of the log state's cloud DB container taken at on_snapshot_save,
+     * so that a leader step-down during save_snapshot cannot release it.
+     */
     std::shared_ptr<DBCloudContainer> dbc_flush;
-    // leader term when on_snapshot_save
-    int64_t leader_term;
-    uint64_t last_tx_num;
+    int64_t leader_term{-1};  ///< leader term at on_snapshot_save, -1 if none
+    uint64_t last_tx_num{0};  ///< last applied tx number at on_snapshot_save
 #endif
 };
 

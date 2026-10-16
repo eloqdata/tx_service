@@ -5,6 +5,11 @@
 find_package(Catch2 REQUIRED)
 include(Catch)
 
+if(WITH_LOG_SERVICE)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../eloq_log_service/test/snapshot
+        ${CMAKE_CURRENT_BINARY_DIR}/log_snapshot)
+endif()
+
 set(TESTS_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(HARNESS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/harness)
 
