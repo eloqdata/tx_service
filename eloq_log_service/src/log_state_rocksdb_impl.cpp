@@ -1,10 +1,12 @@
 #include "log_state_rocksdb_impl.h"
 
 #if defined(LOG_STATE_TYPE_RKDB)
+#include <fcntl.h>
 #include <rocksdb/db.h>
 #include <rocksdb/sst_file_reader.h>
 #include <rocksdb/statistics.h>
 #include <rocksdb/utilities/checkpoint.h>
+#include <unistd.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -19,6 +21,35 @@
 
 namespace txlog
 {
+namespace
+{
+/**
+ * Flushes a snapshot file or directory to stable storage.
+ * @param path File or directory to fsync; a directory persists its entries.
+ * @return true on success, false after logging the failing call.
+ */
+bool SyncSnapshotPath(const std::string &path)
+{
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        PLOG(ERROR) << "Open snapshot for sync failed: " << path;
+        return false;
+    }
+    int rc;
+    do
+    {
+        rc = fsync(fd);
+    } while (rc != 0 && errno == EINTR);
+    if (rc != 0)
+    {
+        PLOG(ERROR) << "Sync snapshot failed: " << path;
+    }
+    close(fd);
+    return rc == 0;
+}
+}  // namespace
+
 LogStateRocksDBImpl::LogStateRocksDBImpl(const std::string &rocksdb_path,
                                          const size_t sst_files_size_limit,
                                          const size_t rocksdb_scan_threads)
@@ -239,10 +270,14 @@ std::vector<std::string> LogStateRocksDBImpl::WriteSnapshot(
     {
         // write ng terms to file 'data'
         auto path = snapshot_path + "/data";
+        std::ofstream os(path.c_str());
+        WriteSnapshotNgInfoAndCatalogOpsTo(os);
+        os.close();
+        if (!os || !SyncSnapshotPath(path))
         {
-            std::ofstream os(path.c_str());
-            WriteSnapshotNgInfoAndCatalogOpsTo(os);
-        }  // close file
+            LOG(ERROR) << "Failed to write snapshot metadata: " << path;
+            return {};
+        }
         res.emplace_back("data");
     }
 
@@ -253,14 +288,8 @@ std::vector<std::string> LogStateRocksDBImpl::WriteSnapshot(
     if (!status.ok())
     {
         LOG(ERROR) << "Create checkpoint object failed: " << status.ToString();
+        return {};
     }
-    assert(status.ok());
-
-    // do compaction before checkpoint, so we get smaller checkpoint file?
-    //    rocksdb::CompactRangeOptions options;
-    //    options.change_level = true;
-    //    options.target_level = -1;
-    //    db_->CompactRange(options, nullptr, nullptr);
 
     LOG(INFO) << "log state rocksdbImpl doing checkpoint";
     std::string ckpt_path = snapshot_path + "/rocksdb_ckpt";
@@ -270,29 +299,42 @@ std::vector<std::string> LogStateRocksDBImpl::WriteSnapshot(
     if (error_code.value() != 0)
     {
         LOG(ERROR) << error_code.value() << " " << error_code.message();
+        return {};
     }
     status = checkpoint->CreateCheckpoint(ckpt_path);
     if (!status.ok())
     {
         LOG(ERROR) << "Create checkpoint failed: " << status.ToString();
+        return {};
     }
-    assert(status.ok());
     std::filesystem::directory_iterator dir_ite(ckpt_path, error_code);
     if (error_code.value() != 0)
     {
         LOG(ERROR) << error_code.value() << " " << error_code.message();
+        return {};
     }
     else
     {
-        for (const auto &entry : std::filesystem::directory_iterator(ckpt_path))
+        for (const auto end = std::filesystem::directory_iterator();
+             dir_ite != end;
+             dir_ite.increment(error_code))
         {
+            // A failed increment leaves the iterator at end; the error is
+            // checked once after the loop.
             // add relative path
             std::string path("rocksdb_ckpt/");
-            res.emplace_back(path.append(entry.path().filename()));
+            res.emplace_back(path.append(dir_ite->path().filename()));
+        }
+        if (error_code)
+        {
+            LOG(ERROR) << "List checkpoint failed: " << error_code.message();
+            return {};
         }
     }
 
-    return res;
+    // braft syncs its manifest, not application files. Persist our directory
+    // entries before handing the file list to braft for snapshot publication.
+    return SyncSnapshotPath(snapshot_path) ? res : std::vector<std::string>{};
 }
 
 /**

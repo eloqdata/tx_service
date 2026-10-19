@@ -3,6 +3,7 @@
 #include <braft/raft.h>
 #include <braft/route_table.h>
 #include <butil/endpoint.h>
+#include <pthread.h>
 
 #include <atomic>
 #include <mutex>
@@ -1143,9 +1144,9 @@ void LogInstance::LogGroupLeaderUpdate()
 void LogInstance::on_snapshot_save(braft::SnapshotWriter *writer,
                                    braft::Closure *done)
 {
-    // Save current StateMachine in memory and starts a new bthread to avoid
-    // blocking StateMachine since it's a bit slow to write data to disk
-    // file.
+    // Capture metadata on the serialized FSM before allowing more on_apply
+    // calls. Filesystem work, including RocksDB's synchronous checkpoint fsync,
+    // must run on an OS thread rather than pinning a shared brpc worker.
     auto start = std::chrono::high_resolution_clock::now();
     SnapshotClosure *sc = new SnapshotClosure;
     sc->writer = writer;
@@ -1178,24 +1179,62 @@ void LogInstance::on_snapshot_save(braft::SnapshotWriter *writer,
         std::chrono::duration_cast<std::chrono::milliseconds>(stop - start)
             .count();
     LOG(INFO) << "log server generate snapshot cost " << ms << " millseconds";
-    bthread_t tid;
-    bthread_start_urgent(&tid, NULL, save_snapshot, sc);
+    pthread_attr_t attr;
+    int rc = pthread_attr_init(&attr);
+    if (rc == 0)
+    {
+        rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (rc == 0)
+        {
+            pthread_t tid;
+            rc = pthread_create(&tid, &attr, save_snapshot, sc);
+        }
+        pthread_attr_destroy(&attr);
+    }
+    if (rc != 0)
+    {
+        // There is no worker to own sc on failure. Never fall back to doing
+        // blocking I/O on the FSM. braft can retry a failed snapshot later.
+        brpc::ClosureGuard done_guard(done);
+        std::unique_ptr<SnapshotClosure> sc_guard(sc);
+        done->status().set_error(rc, "Failed to start snapshot pthread");
+    }
 }
 
 void *LogInstance::save_snapshot(void *arg)
 {
-    LOG(INFO) << "Save snapshot start";
+    pthread_setname_np(pthread_self(), "log_snapshot");
+    LOG(INFO) << "Save snapshot start on dedicated pthread";
 
     SnapshotClosure *sc = static_cast<SnapshotClosure *>(arg);
-    std::unique_ptr<SnapshotClosure> sc_guard(sc);
     brpc::ClosureGuard done_guard(sc->done);
+    // braft Node::join waits for done. Destroy sc (and all borrowed state)
+    // before invoking it, and never touch the LogInstance after completion.
+    std::unique_ptr<SnapshotClosure> sc_guard(sc);
     const std::string &snapshot_path = sc->writer->get_path();
 
+    // Error-code choice: braft treats EIO from on_snapshot_save as a storage
+    // failure, calls report_error, and moves the node to STATE_ERROR for good.
+    // A failed checkpoint or metadata write should instead fail only this
+    // attempt and leave the node serving writes; braft discards the temp
+    // directory and retries at the next snapshot interval. EPERM, like the
+    // cloud flush path below, is reported but is not fatal to the node.
     auto snapshot_files = sc->log_state_ref->WriteSnapshot(snapshot_path);
+    if (snapshot_files.empty())
+    {
+        sc->done->status().set_error(EPERM, "Failed to write snapshot files");
+        return nullptr;
+    }
     for (const auto &file_path : snapshot_files)
     {
         LOG(INFO) << "adding snapshot file: " << file_path;
-        CHECK_EQ(0, sc->writer->add_file(file_path));
+        if (sc->writer->add_file(file_path) != 0)
+        {
+            sc->done->status().set_error(EPERM,
+                                         "Failed to register snapshot file %s",
+                                         file_path.c_str());
+            return nullptr;
+        }
     }
 
 #if defined(LOG_STATE_TYPE_RKDB_CLOUD)
@@ -1218,7 +1257,6 @@ void *LogInstance::save_snapshot(void *arg)
         {
             // rocksdb cloud rolling up timeout
             sc->done->status().set_error(EPERM, "Flush RocksDB Cloud failed");
-            sc->log_state_ref->CleanSnapshotState();
             return nullptr;
         }
 
@@ -1238,7 +1276,6 @@ void *LogInstance::save_snapshot(void *arg)
             LOG(ERROR) << "Flush RocksDB Cloud Failed! Error: "
                        << status.ToString();
             sc->done->status().set_error(EPERM, "Flush RocksDB Cloud failed");
-            sc->log_state_ref->CleanSnapshotState();
             return nullptr;
         }
         uint64_t max_sst_file_num =
@@ -1264,7 +1301,6 @@ void *LogInstance::save_snapshot(void *arg)
             LOG(ERROR) << "Failed to serialize the PostSnapshotRequest request";
             sc->done->status().set_error(
                 EPERM, "Failed to serialize the PostSnapshotRequest request");
-            sc->log_state_ref->CleanSnapshotState();
             return nullptr;
         }
         else
@@ -1294,7 +1330,6 @@ void *LogInstance::save_snapshot(void *arg)
                 LOG(ERROR) << "Failed to apply PostSnapshotRequest request";
                 sc->done->status().set_error(
                     EPERM, "Failed to apply PostSnapshotRequest request");
-                sc->log_state_ref->CleanSnapshotState();
                 return nullptr;
             }
 
@@ -1309,7 +1344,6 @@ void *LogInstance::save_snapshot(void *arg)
     }
 #endif
 
-    sc->log_state_ref->CleanSnapshotState();
     LOG(INFO) << "Save snapshot done";
     return nullptr;
 }

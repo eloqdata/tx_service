@@ -1210,13 +1210,27 @@ std::vector<std::string> LogStateRocksDBCloudImpl::WriteSnapshot(
             auto path = snapshot_path + "/nginfo_and_catalog";
             std::ofstream os(path.c_str());
             WriteSnapshotNgInfoAndCatalogOpsTo(os);
-        }  // close file
+            // Buffered write errors may surface only when close flushes them.
+            // Do not publish a file list until both streams close successfully.
+            os.close();
+            if (!os)
+            {
+                LOG(ERROR) << "Failed to write snapshot metadata: " << path;
+                return {};
+            }
+        }
         res.emplace_back("nginfo_and_catalog");
 
         {
             auto path = snapshot_path + "/in_mem_data_log";
             std::ofstream os(path.c_str());
             WriteSnapshotInMemState(os);
+            os.close();
+            if (!os)
+            {
+                LOG(ERROR) << "Failed to write snapshot data logs: " << path;
+                return {};
+            }
         }
         res.emplace_back("in_mem_data_log");
     }

@@ -604,8 +604,13 @@ void PartitionBatchCallback(void *data,
     if (result.error_code() != remote::DataStoreError::NO_ERROR)
     {
         partition_state->MarkFailed(result);
+        // The partition sends nothing more, so its record buffers are dead:
+        // free them and report only what was actually freed, no matter how
+        // many batches never went out.
+        const uint64_t freed_bytes =
+            partition_state->ReleaseFlushRecordsMemory();
         // Notify the global coordinator that this partition failed
-        global_coordinator->OnPartitionCompleted();
+        global_coordinator->OnPartitionCompleted(freed_bytes);
         return;
     }
 
@@ -633,8 +638,48 @@ void PartitionBatchCallback(void *data,
     }
     else
     {
-        // Notify the global coordinator that this partition completed
-        global_coordinator->OnPartitionCompleted();
+        // Every batch of this partition is durable, so nothing views the
+        // record buffers again: free them here, on the storage thread rather
+        // than a cc shard, so the completion report below returns quota whose
+        // memory is already free.
+        const uint64_t freed_bytes =
+            partition_state->ReleaseFlushRecordsMemory();
+        // Publish the ckpt ts of the
+        // cc entries it carried before reporting completion, so those entries
+        // become evictable now instead of when the slowest sibling partition in
+        // the same flush task lands. The request was constructed and its
+        // completion hook armed when the partition was set up; this only hands
+        // it to the shards, chained rather than waited on because this runs on
+        // a storage completion thread, which must not block on cc shards. The
+        // hook reports the partition complete once every shard has applied.
+        if (partition_state->ckpt_ts_update_.has_value())
+        {
+            auto *local_shards =
+                txservice::Sharder::Instance().GetLocalCcShards();
+
+            auto *update = &partition_state->ckpt_ts_update_.value();
+            auto it = partition_state->ckpt_ts_entries_.begin();
+            const auto end = partition_state->ckpt_ts_entries_.end();
+            while (it != end)
+            {
+                const uint16_t core_id = static_cast<uint16_t>(it->first);
+                // Advance before publishing: the final shard may complete the
+                // request immediately and wake PutAll, which can recycle
+                // partition_state while EnqueueToCcShard returns.
+                const bool is_last = ++it == end;
+                local_shards->EnqueueToCcShard(core_id, update);
+                if (is_last)
+                {
+                    break;
+                }
+            }
+        }
+        else
+        {
+            // No ckpt-ts entries were collected, so no request was armed.
+            // Report completion directly.
+            global_coordinator->OnPartitionCompleted(freed_bytes);
+        }
     }
 }
 
@@ -1812,5 +1857,62 @@ bool PartitionFlushState::GetNextBatch(PartitionBatchRequest &batch)
     batch = std::move(pending_batches.front());
     pending_batches.pop();
     return true;
+}
+
+void PartitionFlushState::AddCkptTsEntry(const txservice::DataSyncTask *task,
+                                         size_t core_idx,
+                                         txservice::LruEntry *cce,
+                                         uint64_t commit_ts,
+                                         size_t post_flush_size)
+{
+    assert(task != nullptr);
+    if (ckpt_ts_task_ == nullptr)
+    {
+        ckpt_ts_task_ = task;
+    }
+    else
+    {
+        // PutAllImpl removes lower-term records before batch preparation, so a
+        // partition must never mix publication metadata from different terms.
+        assert(ckpt_ts_task_->node_group_id_ == task->node_group_id_);
+        assert(ckpt_ts_task_->node_group_term_ == task->node_group_term_);
+        assert(ckpt_ts_task_->table_name_ == task->table_name_);
+    }
+    ckpt_ts_entries_[core_idx].emplace_back(cce, commit_ts, post_flush_size);
+}
+
+void PartitionFlushState::ArmCkptTsUpdate(SyncPutAllData *sync_putall)
+{
+    assert(sync_putall != nullptr);
+    if (ckpt_ts_entries_.empty())
+    {
+        assert(ckpt_ts_task_ == nullptr);
+        return;
+    }
+    assert(ckpt_ts_task_ != nullptr);
+    ckpt_ts_update_.emplace(ckpt_ts_task_->node_group_id_,
+                            ckpt_ts_task_->node_group_term_,
+                            ckpt_ts_task_->table_name_,
+                            ckpt_ts_entries_);
+    // The armed hook runs after the partition's buffers were freed on the
+    // storage thread (PartitionBatchCallback frees before enqueueing this
+    // request), so reporting the partition's full charge is accurate.
+    const uint64_t done_bytes = charged_mem_bytes_;
+    ckpt_ts_update_->SetOnFinished(
+        [sync_putall, done_bytes]
+        { sync_putall->OnPartitionCompleted(done_bytes); });
+}
+
+uint64_t PartitionFlushState::ReleaseFlushRecordsMemory()
+{
+    uint64_t freed = 0;
+    for (txservice::FlushRecord *rec : flush_records_)
+    {
+        rec->ReleaseMemory();
+    }
+    flush_records_.clear();
+    freed = charged_mem_bytes_;
+    charged_mem_bytes_ = 0;
+    return freed;
 }
 }  // namespace EloqDS

@@ -333,7 +333,8 @@ public:
                      const std::vector<std::string> &files) override;
 
     /**
-     * write snapshot files to snapshot_path and return the relative filenames
+     * Write recovery metadata and a RocksDB checkpoint on a dedicated pthread.
+     * Return relative filenames on success, an empty vector on I/O failure.
      * @param snapshot_path
      * @return
      */
@@ -695,7 +696,8 @@ public:
                      const std::vector<std::string> &files) override;
 
     /**
-     * write snapshot files to snapshot_path and return the relative filenames
+     * Write snapshot files and return their relative filenames. Return an
+     * empty vector if either output stream fails, including on close.
      * @param snapshot_path
      * @return
      */

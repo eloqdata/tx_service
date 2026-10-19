@@ -131,10 +131,10 @@ jobs:
       CMAKE_LIBRARY_PATH: /opt/eloq/third_party/lib
       LD_LIBRARY_PATH: /opt/eloq/third_party/lib
       # Consumed by eloq_log_service/test/test_utils.h + the cloud test harness:
-      # routes rocksdb-cloud's S3 client at MinIO with path-style addressing.
+      # routes rocksdb-cloud's S3 client at RustFS with path-style addressing.
       TEST_S3_ENDPOINT: http://127.0.0.1:9000
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ACCESS_KEY_ID: rustfsadmin
+      AWS_SECRET_ACCESS_KEY: rustfsadmin
       AWS_EC2_METADATA_DISABLED: "true"
     steps:
       - name: Checkout (recursive submodules)
@@ -147,6 +147,15 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           cache-scope: ubuntu-dev
+
+      - name: Check image-provided S3 test server
+        # The shared ubuntu-dev image pins RustFS for EloqKV and EloqDoc too.
+        run: |
+          if ! command -v rustfs >/dev/null 2>&1; then
+            echo "RustFS is missing; use an ubuntu-dev image with RustFS preinstalled." >&2
+            exit 1
+          fi
+          rustfs --version
 
       - name: Compile-check (RocksDB, all test targets)
         run: |
@@ -164,33 +173,51 @@ jobs:
             -DELOQ_THIRD_PARTY_REQUIRED=ON
           cmake --build eloq_log_service/bld_cloud --parallel "$(nproc)"
 
-      - name: Run cloud unit tests against MinIO
-        # Start MinIO and run the test in one step so the server (backgrounded)
-        # is guaranteed alive for the test. Uses curl health checks rather than
-        # bash-only /dev/tcp so it is robust regardless of shell.
+      - name: Run cloud unit tests against RustFS
+        # Keep the server in this step and clean it up even when the test fails.
         run: |
-          curl -fsSL "https://dl.min.io/server/minio/release/linux-${{ matrix.arch }}/minio" \
-            -o /usr/local/bin/minio
-          chmod +x /usr/local/bin/minio
-          mkdir -p /tmp/minio-data
-          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
-            minio server /tmp/minio-data --address ":9000" > /tmp/minio.log 2>&1 &
+          rustfs_run_dir=$(mktemp -d /tmp/tx-service-rustfs.XXXXXX)
+          rustfs_pid=
+          cleanup() {
+            local result=$?
+            trap - EXIT
+            if [ "$result" -ne 0 ]; then
+              cat "${rustfs_run_dir}/rustfs.log" >&2 || true
+            fi
+            if [ -n "$rustfs_pid" ]; then
+              kill "$rustfs_pid" 2>/dev/null || true
+              wait "$rustfs_pid" 2>/dev/null || true
+            fi
+            rm -rf "$rustfs_run_dir" || true
+            exit "$result"
+          }
+          trap cleanup EXIT
+          mkdir -p "${rustfs_run_dir}/data"
+          RUSTFS_ACCESS_KEY="$AWS_ACCESS_KEY_ID" RUSTFS_SECRET_KEY="$AWS_SECRET_ACCESS_KEY" \
+            RUSTFS_ADDRESS="${TEST_S3_ENDPOINT#http://}" RUSTFS_CONSOLE_ENABLE=false \
+            rustfs server "${rustfs_run_dir}/data" > "${rustfs_run_dir}/rustfs.log" 2>&1 &
+          rustfs_pid=$!
           ok=0
           for i in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
-              ok=1; echo "MinIO is up"; break
+            if ! kill -0 "$rustfs_pid" 2>/dev/null; then
+              echo "RustFS exited before becoming ready." >&2
+              exit 1
+            fi
+            if curl -sf --noproxy '*' --max-time 2 "${TEST_S3_ENDPOINT}/health/ready" >/dev/null 2>&1; then
+              ok=1; echo "RustFS is ready"; break
             fi
             sleep 1
           done
           if [ "$ok" != "1" ]; then
-            echo "MinIO failed to start:" >&2; cat /tmp/minio.log >&2; exit 1
+            echo "RustFS did not become ready at ${TEST_S3_ENDPOINT}." >&2
+            exit 1
           fi
           # test_rocksdb_cloud_sst_reader exercises the rocksdb-cloud storage
-          # provider end-to-end against MinIO. The DBCloud::Open-based cases
+          # provider end-to-end against RustFS. The DBCloud::Open-based cases
           # currently crash inside librocksdb-cloud (ABI/vtable mismatch) and are
           # tracked separately, so they are excluded here.
           cd eloq_log_service/bld_cloud
           ./log_server_rocksdb_cloud_tests "test_rocksdb_cloud_sst_reader" \
             --region us-east-1 \
-            --aws_access_key_id minioadmin \
-            --aws_secret_key minioadmin
+            --aws_access_key_id "$AWS_ACCESS_KEY_ID" \
+            --aws_secret_key "$AWS_SECRET_ACCESS_KEY"

@@ -5,6 +5,11 @@
 find_package(Catch2 REQUIRED)
 include(Catch)
 
+if(WITH_LOG_SERVICE)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../eloq_log_service/test/snapshot
+        ${CMAKE_CURRENT_BINARY_DIR}/log_snapshot)
+endif()
+
 set(TESTS_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(HARNESS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/harness)
 
@@ -66,7 +71,10 @@ set(CATCH_MAIN_TESTS
     CcRequestWait-Test
     CcRequestPool-Test
     CheckpointMetricsState-Test
+    CheckpointFlush-Test
     FetchRecordCc-Test
+    RangeSplitCheckpoint-Test
+    RealDataStore-Test
     NonBlockingLock-Test
     AcquireAllError-Test
     StandbyForward-Test
@@ -101,7 +109,12 @@ function(add_substrate_test name catch_lib)
     target_link_libraries(${name} PRIVATE test_harness ${catch_lib})
     set_property(TARGET ${name} PROPERTY CXX_STANDARD 20)
     set_property(TARGET ${name} PROPERTY CXX_EXTENSIONS OFF)
-    catch_discover_tests(${name} PROPERTIES LABELS "${name}")
+    # Catch2 exits 4 when every selected test skipped. Without this, a test that
+    # correctly opts out -- because the build lacks the backend it covers, or
+    # because it needs an env var to touch real storage -- is reported as a
+    # failure.
+    catch_discover_tests(${name}
+        PROPERTIES LABELS "${name}" SKIP_RETURN_CODE 4)
 endfunction()
 
 foreach(name ${CATCH_MAIN_TESTS})
@@ -136,4 +149,5 @@ target_link_libraries(ClusterCrossNg-Test PRIVATE
 set_property(TARGET ClusterCrossNg-Test PROPERTY CXX_STANDARD 20)
 set_property(TARGET ClusterCrossNg-Test PROPERTY CXX_EXTENSIONS OFF)
 add_dependencies(ClusterCrossNg-Test txnode)
-catch_discover_tests(ClusterCrossNg-Test PROPERTIES LABELS "ClusterCrossNg-Test")
+catch_discover_tests(ClusterCrossNg-Test
+    PROPERTIES LABELS "ClusterCrossNg-Test" SKIP_RETURN_CODE 4)
