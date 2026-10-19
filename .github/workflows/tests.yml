@@ -136,6 +136,10 @@ jobs:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_EC2_METADATA_DISABLED: "true"
+      # MinIO's community binary download endpoint is gone. Build the pinned
+      # RELEASE.2025-10-15T17-29-55Z source with its declared Go toolchain.
+      MINIO_COMMIT: 9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
+      MINIO_GO_VERSION: "1.24.8"
     steps:
       - name: Checkout (recursive submodules)
         uses: actions/checkout@v4
@@ -147,6 +151,28 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           cache-scope: ubuntu-dev
+
+      - name: Restore MinIO binary
+        id: minio-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/minio-bin
+          key: minio-${{ runner.os }}-${{ matrix.arch }}-go${{ env.MINIO_GO_VERSION }}-${{ env.MINIO_COMMIT }}
+
+      - name: Setup Go for MinIO
+        if: steps.minio-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.MINIO_GO_VERSION }}
+          cache: false
+
+      - name: Build MinIO from source (cache miss)
+        if: steps.minio-cache.outputs.cache-hit != 'true'
+        env:
+          GOBIN: ${{ runner.temp }}/minio-bin
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+        run: go install "github.com/minio/minio@${MINIO_COMMIT}"
 
       - name: Compile-check (RocksDB, all test targets)
         run: |
@@ -169,12 +195,11 @@ jobs:
         # is guaranteed alive for the test. Uses curl health checks rather than
         # bash-only /dev/tcp so it is robust regardless of shell.
         run: |
-          curl -fsSL "https://dl.min.io/server/minio/release/linux-${{ matrix.arch }}/minio" \
-            -o /usr/local/bin/minio
-          chmod +x /usr/local/bin/minio
+          minio_bin="${RUNNER_TEMP}/minio-bin/minio"
+          "$minio_bin" --version
           mkdir -p /tmp/minio-data
           MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
-            minio server /tmp/minio-data --address ":9000" > /tmp/minio.log 2>&1 &
+            "$minio_bin" server /tmp/minio-data --address ":9000" > /tmp/minio.log 2>&1 &
           ok=0
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
