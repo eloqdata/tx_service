@@ -23,7 +23,14 @@ Ordinary data transactions write their effects to one selected log group.
 Schema changes, range splits, cluster scaling, and bucket migration use staged
 records because their effects span metadata and data lifecycles. Those stages
 are recovery state, not a second execution history: replay uses them to decide
-which incomplete operation must be resumed or completed.
+which incomplete operation must be resumed or completed. The cluster gate,
+which pauses schema operations while a change data capture consumer copies the
+data, writes one unstaged record per change, kept in log group 0's slot.
+
+A transaction's record holds a blob per NG it writes. A key double-written
+while its range splits or its bucket migrates goes into the blob of every NG it
+is written to, once per NG: until that NG checkpoints the key, its blob is all
+that NG's recovery has of it.
 
 An uncertain log result is not treated as an abort. The coordinator preserves
 write locks until the result can be established from the log service, because
@@ -41,9 +48,16 @@ store copy.
 
 ## Checkpointing
 
-`Checkpointer` runs per node and advances each locally led NG independently.
-It first computes a safe timestamp that does not pass active transactions or
-outstanding write locks. Data-sync tasks then scan dirty entries on their owner
+`Checkpointer` runs per node and advances each locally led NG independently,
+every `checkpointer_interval` (at least 5 s) or on request. It first computes a
+safe timestamp that does not pass active transactions or outstanding write
+locks: below each transaction's latest write-lock grant on a data table or
+catalog entry (range, bucket and cluster-config write locks, intents and read
+locks do not count). A DML transaction picks its commit timestamp after its
+last write lock, and a schema operation commits above its catalog write lock,
+so no transaction commits at or below a checkpoint timestamp once it is taken.
+That is what makes the timestamp an NG reports to the log service a watermark
+for change data capture. Data-sync tasks then scan dirty entries on their owner
 shards, materialize base rows and archives, and flush them through
 `DataStoreHandler`.
 
@@ -92,16 +106,37 @@ the warm cache and start replay after its last consistent timestamp; otherwise
 it reconstructs state from the durable store plus the complete applicable log
 history.
 
+The node asks each log group for replay once, at its leader start, with one
+bounded attempt, and asks again only a group that has neither finished the
+term's replay nor opened a replay stream a few seconds after the last request
+(`RecoveryService`'s watchdog); a stream that stalls is closed by its idle
+timeout, which asks that group again. A group asked twice ships twice, the
+second shipping replacing the first.
+
 Replay orders dependencies before ordinary data. Cluster and bucket metadata,
-catalog operations, and range-split state are restored before data records are
-allowed to complete. Barriers across log-group streams prevent a data record
-from being interpreted against an obsolete schema or placement model.
+the cluster gate, catalog operations, and range-split state are restored before
+data records are allowed to complete. Barriers across log-group streams prevent
+a data record from being interpreted against an obsolete schema or placement
+model.
 
 Each replay request is fenced by the candidate term. Data replay is idempotent:
 records already represented by an equal or newer committed version are skipped,
 and records outside the recovered NG's current ownership are ignored. In-flight
 schema, split, scale, and migration operations are resumed from their durable
 stage through recovery transaction requests.
+
+A recovered schema operation's coordinator NG restores a write intent on the
+catalog entry, so data replay of the table proceeds, and the operation resumes
+after the log record it was recovered from, at the timestamp that record
+carries. A participant restores the lock the coordinator may rely on: after a
+prepare-stage record the write lock, unless a range split it coordinates holds
+the table's catalog read lock, and for an index build only after its last
+prepare-data record; after a commit-stage record the committed schema and no
+lock ([range-split-schema-op-recovery.md](range-split-schema-op-recovery.md)). A
+node whose catalog entry is write-locked this way finishes start-up only once
+the operation commits. The recovered cluster gate is set in place, and the
+gate's coordinator re-sends its install with no lock, releasing the write lock
+wherever the gate transaction still holds it.
 
 The node publishes its serving leader term only after every log group reports
 replay complete. A broken replay stream is retried; partial progress never
@@ -115,7 +150,10 @@ that is inconclusive, `RecoveryService` asks the log service whether the
 transaction is committed under the recorded coordinator and participant terms.
 
 An uncommitted transaction can be cleared. A committed transaction is replayed
-onto entries that still retain its write lock and then released. An unreachable
+onto entries that still retain its write lock and then released. A transaction
+found as a multi-stage operation or as the cluster gate transaction is also
+committed, but nothing is shipped: its metadata locks stay until its
+coordinator's recovery releases them. An unreachable
 log service leaves the lock in place for a later retry. This favors correctness
 over availability when the commit decision is unknown.
 
@@ -123,14 +161,21 @@ over availability when the commit decision is unknown.
 
 When MVCC is enabled, an update archives the prior committed version before
 installing the new one. Checkpoint data sync persists both base values and
-historical versions. Snapshot reads first consult the in-memory version chain
-and fetch the necessary base or archive version from the store when the chain no
-longer covers the requested timestamp.
+historical versions: per entry, the newest version at or below the round's
+checkpoint timestamp goes to the base table and older ones to the archives
+table. Snapshot reads first consult the in-memory version chain and fetch the
+necessary base or archive version from the store when the chain no longer
+covers the requested timestamp. A snapshot transaction starts at the later of
+the shard's timestamp base and its wall clock, and advances the base.
 
-The oldest active snapshot timestamp bounds archive reclamation and delays
-checkpoint choices that would otherwise discard a still-visible version.
-Consequently, active-transaction timestamp collection is part of the durability
-and garbage-collection model rather than only an observability feature.
+The oldest active snapshot transaction's start alone bounds the reclamation of
+in-memory versions (`CcEntry::KickOutArchiveRecords`). The checkpoint delay
+(`checkpointer_delay_seconds`, 5 s by default) is a cache residency choice:
+while a snapshot transaction that started earlier runs, it lowers a round's
+checkpoint timestamp by at most the delay, so recently updated entries stay
+dirty and therefore resident, and a snapshot read finds their versions in
+memory. Active-transaction timestamp collection is therefore part of the
+garbage-collection model rather than only an observability feature.
 
 ## Snapshots and standby bootstrap
 
@@ -154,7 +199,7 @@ accepted-request event.
 ## Cross-cutting invariants
 
 - A checkpoint timestamp never passes an active write whose outcome is not
-  represented durably.
+  represented durably, and no transaction commits at or below it afterwards.
 - Log truncation advances only after every included store write and required
   persistence barrier succeeds.
 - A candidate term fences replay; a serving leader term is published only after
@@ -181,4 +226,8 @@ accepted-request event.
 | Replay restores metadata dependencies and resumes incomplete durable operations | `tx_service/include/cc/catalog_cc_map.h`; `tx_service/include/cc/range_cc_map.h`; `tx_service/include/cc/cluster_config_cc_map.h`; `tx_service/include/cc/range_bucket_cc_map.h` |
 | MVCC versions are archived, fetched, and reclaimed against active snapshots | `tx_service/include/cc/cc_entry.h`; `tx_service/include/tx_start_ts_collector.h`; `tx_service/include/store/data_store_handler.h` |
 | Standby and backup snapshots are coordinated above the storage interface | `tx_service/include/store/snapshot_manager.h`; `tx_service/src/store/snapshot_manager.cpp`; `tx_service/include/store/data_store_handler.h` |
+| The checkpoint counts each transaction's latest data or catalog write-lock grant | `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp`; `tx_service/tests/CkptLockRegistry-Test.cpp` |
+| Forwarded keys are logged to every NG they are written to | `tx_service/src/tx_execution.cpp` |
+| Replay is requested once per log group and again only for a silent group | `tx_service/src/sharder.cpp`; `tx_service/src/fault/log_replay_service.cpp`; `tx_service/tx-log-protos/log_agent.cpp` |
+| Recovered schema operations restore intents or write locks by role, and the gate is reinstalled | `tx_service/include/cc/catalog_cc_map.h`; `tx_service/include/cc/cluster_config_cc_map.h`; `tx_service/src/tx_execution.cpp`; `docs/range-split-schema-op-recovery.md` |
 | Checkpoint publication, split ownership, state and MVCC behavior have focused unit coverage | `tx_service/tests/CheckpointFlush-Test.cpp`; `tx_service/tests/RangeSplitCheckpoint-Test.cpp`; `tx_service/tests/CheckpointMetricsState-Test.cpp`; `tx_service/tests/CcEntry-Test.cpp`; `tx_service/tests/StartTsCollector-Test.cpp` |

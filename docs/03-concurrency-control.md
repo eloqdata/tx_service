@@ -95,12 +95,28 @@ entry before the read resumes. Snapshot reads may select an archived version,
 with durable version retrieval delegated to the store boundary.
 
 Writes are buffered by the transaction until commit. Commit-time acquisition
-takes the required write locks and returns version/timestamp bounds.
+takes the required write locks and returns version/timestamp bounds: each grant
+reports the granting shard's clock above the reads it has served
+(`last_vali_ts`), and the commit timestamp is chosen above every bound. A lock
+taken on every core of every NG (`AcquireAllCc`, used by schema, range, bucket
+and cluster gate operations) reports the later of the shard's last read
+timestamp and its clock, so a schema operation's timestamps lie above its
+catalog write lock's grant. A catalog reader publishes its commit timestamp on
+release, including EloqKV's fast catalog read (`ReleaseCatalogRead`), so a later
+schema operation commits above it.
 Post-read requests validate optimistic reads and release read ownership;
 post-write requests install the committed value or discard the pending value,
 then release the write lock and wake waiters. Object-command maps use the same
 lock lifecycle but apply and commit engine commands against shard-owned
 objects.
+
+A snapshot-isolation transaction starts at the later of its node's timestamp
+base and the wall clock, and a newer wall clock advances the base: commits take
+timestamps above their own node's base, so a start taken from another node's
+base alone could miss writes that node had acknowledged. Across hosts, a
+read-only transaction's start can trail another host's commits by their clock
+skew, which is accepted; a write transaction spanning nodes is ordered by the
+read timestamps every participant records.
 
 Scanners are batched cursors over memory and, when needed, persistent data.
 They retain the intents or locks needed to keep continuation points valid and
@@ -131,6 +147,22 @@ intents they hold. The registry is part of the correctness model: checkpointing
 uses it to derive active-transaction bounds, failover recovery uses it to find
 orphaned ownership, and deadlock detection uses it to build the wait-for graph.
 
+For each transaction the registry records its latest write-lock grant and
+whether it holds a write lock that keeps the checkpoint below that grant. Write
+locks on data tables and catalog entries count; range, bucket and
+cluster-configuration write locks, intents and read locks do not, since split
+and migration operations hold them for long stretches and nothing needs them
+ordered against the checkpoint. The decision is made per lock when it is
+registered, as one transaction's locks span many tables. A downgrade stops the
+lock from counting unless another counting lock of the transaction remains in
+the shard; the commit-stage upgrade counts again from the upgrade time.
+
+DML chooses its commit timestamp after its last write lock, so the latest grant
+is also the tightest lower bound on its commit. Schema operations rely on the
+exclusive section instead: index operations choose their commit timestamp at
+prepare under the write lock, and create, drop and truncate choose it again
+under their commit-stage write lock, above every DML that lock drained.
+
 The deadlock service gathers local shard wait relationships and corresponding
 relationships from other node-group leaders, detects cycles, and asks the
 owner shard to abort a victim. Victim abort and lock release re-enter the normal
@@ -151,6 +183,8 @@ directly.
   preserves their location and lifetime.
 - The transaction-to-lock registry must remain synchronized with logical lock
   ownership; stale registry state can pin checkpoints or misdirect recovery.
+- While a transaction holds a write lock on a data table or catalog entry, the
+  checkpoint stays below its latest write-lock grant.
 - Eviction cannot remove dirty or transactionally owned entries.
 
 ## Source map
@@ -167,4 +201,7 @@ directly.
 | Typed maps own pages, entries, versions, and object-command specializations | `tx_service/include/cc/cc_entry.h`; `tx_service/include/cc/template_cc_map.h`; `tx_service/include/cc/object_cc_map.h` |
 | Scanners retain CC ownership across batched progress | `tx_service/include/cc/ccm_scanner.h`; `tx_service/include/cc/cc_request.h`; `tx_service/src/tx_execution.cpp` |
 | Shard-local eviction admits only unowned persistent entries | `tx_service/include/cc/cc_entry.h`; `tx_service/include/cc/cc_page_clean_guard.h`; `tx_service/src/cc/cc_shard.cpp` |
+| The lock registry records each transaction's latest write-lock grant and whether it bounds the checkpoint | `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp`; `tx_service/src/cc/cc_map.cpp`; `tx_service/tests/CkptLockRegistry-Test.cpp` |
+| Lock grants report timestamp bounds, and catalog readers publish their commit timestamps | `tx_service/include/cc/template_cc_map.h`; `tx_service/src/cc/local_cc_handler.cpp`; `tx_service/src/tx_upsert_table_operation.cpp` |
+| Snapshot transactions start at the later of the timestamp base and the wall clock | `tx_service/src/cc/cc_shard.cpp`; `tx_service/src/cc/local_cc_handler.cpp` |
 | Lock ownership feeds deadlock detection and recovery bookkeeping | `tx_service/include/cc/cc_shard.h`; `tx_service/include/dead_lock_check.h`; `tx_service/src/dead_lock_check.cpp` |

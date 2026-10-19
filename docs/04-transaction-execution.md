@@ -104,6 +104,25 @@ cluster migration are composite operations built on the same stack and result
 model, but their subsystem-specific protocols live in the corresponding
 architecture documents rather than here.
 
+A table schema operation (`UpsertTableOp`) takes the cluster configuration
+read lock first, which the cluster gate can refuse
+([06](06-distribution-and-clustering.md)), then catalog write intents, the
+prepare log, the dirty schema, the commit-stage write locks, the commit log,
+the store steps, the committed schema and the clean log; an index operation
+(`UpsertTableIndexOp`) orders its steps around its build
+([08](08-range-and-bucket-management.md)). Each has a point of no return: the
+commit log for create, drop and truncate, the prepare log for index operations.
+A store failure before it rolls the operation back at once; one after it is
+retried until it succeeds, `ddl_kv_retry_interval_seconds` apart, holding the
+operation's lock. Create, drop and truncate choose their commit timestamp
+again under their commit-stage write lock (`AssignCommitStageTs`), above every
+DML that lock drained. A cluster gate operation (`ClusterGateOp`, always on log
+group 0) reads the gate record for write, takes write intents on every NG with
+optimistic control, then write locks, which wait for admitted schema
+operations, logs, and installs; any failure before its log releases everything
+and starts over after a short random back-off, and after its log it rolls
+forward.
+
 Abort uses the same post-processing ownership map: every successfully acquired
 read, intent, write lock, catalog lock, and placement lock is released through
 CC requests. A recovering coordinator may start with an already determined
@@ -154,5 +173,7 @@ contract.
 | The commit pipeline acquires placement and write ownership, sets a timestamp, validates, logs, and post-processes | `tx_service/src/tx_execution.cpp`; `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp` |
 | WAL failures distinguish abort from an indeterminate outcome | `tx_service/src/tx_execution.cpp` (`Process`/`PostProcess(WriteToLogOp&)`) |
 | Object-command recovery images outlive operation completion and are released at terminal reset | `tx_service/include/tx_operation_result.h`; `tx_service/include/tx_execution.h`; `tx_service/src/tx_execution.cpp` |
+| Schema operations retry store steps after their point of no return and re-choose their commit timestamp under the commit-stage lock | `tx_service/src/tx_upsert_table_operation.cpp`; `tx_service/src/tx_index_operation.cpp`; `tx_service/include/tx_operation.h` |
+| Cluster gate operations drain admitted schema operations and roll forward after their log | `tx_service/src/tx_cluster_gate_operation.cpp`; `tx_service/include/tx_operation.h` |
 | Lock modes derive from isolation level and CC protocol | `tx_service/include/cc_protocol.h`; `tx_service/src/tx_execution.cpp` |
 | Transaction and cross-node commit behavior has integration coverage | `tx_service/tests/TxConsistency-Test.cpp`; `tx_service/tests/ClusterCrossNg-Test.cpp`; `tx_service/tests/TestNodeSmoke-Test.cpp` |

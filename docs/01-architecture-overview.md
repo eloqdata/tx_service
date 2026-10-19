@@ -18,7 +18,7 @@ The proprietary host manager participates through RPC-visible topology and leade
 
 ## Lifecycle and data flow
 
-`DataSubstrate::Init` loads process and cluster configuration. API layers then call `RegisterEngine` with their catalog factory and prebuilt tables. `Start` initializes log, metrics and storage dependencies before constructing and starting the transaction service. Shutdown reverses ownership so transaction work cannot outlive its persistence dependencies.
+`DataSubstrate::Init` loads process and cluster configuration. API layers then call `RegisterEngine` with their catalog factory and prebuilt tables. `Start` initializes log, metrics and storage dependencies before constructing and starting the transaction service; an in-process log server starts before the metrics registry exists and is handed it afterwards (`LogServer::EnableMetrics`). Shutdown reverses ownership so transaction work cannot outlive its persistence dependencies.
 
 A foreground request follows this path:
 

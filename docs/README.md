@@ -20,6 +20,8 @@ Read the overview first, then the focused documents for the subsystem in scope.
 | [10 — Log service](10-log-service.md) | Replicated WAL service and the transaction node's log client | `eloq_log_service/`, `tx_service/tx-log-protos/` |
 | [Standby replication protocol](standby_replication_protocol.md) | Primary-to-standby change stream, snapshot barrier and replay invariants | `tx_service/include/standby.h`, `tx_service/src/standby.cpp` |
 
+Design records keep their own status and are not current-architecture authority: [range-split-schema-op-recovery.md](range-split-schema-op-recovery.md) records which catalog lock a recovered schema operation restores, by role, beside a range split on the same table, and the tests behind it; its conclusions are reconciled into [07](07-durability-and-recovery.md).
+
 `tx_service/raft_host_manager/` is proprietary. Current documentation may describe only the RPC-visible boundary used by the open components. The EloqStore submodule is likewise documented here only at the `DataStoreHandler`/EloqDSS integration boundary.
 
 ## Architecture authoring standard

@@ -87,9 +87,22 @@ entry rather than constructing unrelated schema objects.
 
 A schema change has current and dirty states. Preparation installs a newer
 dirty schema while the current schema remains readable; commit promotes the
-dirty schema, and rejection discards it. Version comparisons make replay and
-repeated delivery idempotent. DDL uses replicated catalog locks so that schema
-visibility and data-path use cannot cross inconsistently.
+dirty schema at the operation's commit timestamp, and rejection discards it. An
+operation rolled back after its prepare log commits too: it keeps the current
+schema, whose version becomes its commit timestamp. Version comparisons make
+replay and repeated delivery idempotent. DDL uses replicated catalog locks so
+that schema visibility and data-path use cannot cross inconsistently. A catalog
+read enters the transaction's read set at the catalog entry's commit timestamp,
+the one the last DDL chose under its write lock, so every transaction that read
+a schema commits above that DDL.
+
+The schema record's version, the last DDL's commit timestamp, is distinct from
+the base and index tables' own versions: a table's CC map carries its table's
+version, requests carry it, and replay skips a log record below it. An engine
+builds a DDL's image before the DDL has a timestamp, so the tx service resolves
+every table's version in the images once the prepare stage has chosen it and
+before anything is logged (`SchemaOp::ResolveSchemaImages`); no logged, stored
+or replicated image leaves a table's version unresolved.
 
 Data-path requests carry the schema version under which their key/record was
 interpreted. Typed CC maps reject nonzero versions that do not match the map's
@@ -131,6 +144,8 @@ format authority.
 - Object-command replay preserves base-version and commit-version ordering.
 - A prepared schema does not become current until the catalog transaction
   commits; replaying preparation or completion must be idempotent.
+- Every image that is logged, stored or replicated records each table's real
+  version.
 
 ## Source map
 
@@ -144,6 +159,7 @@ format authority.
 | Table identity carries name, role, and engine and selects partitioning behavior | `tx_service/include/type.h`; `tx_service/include/constants.h` |
 | `CatalogFactory` constructs engine-specific schemas, maps, keys, records, scanners, and statistics | `tx_service/include/catalog_factory.h`; `tx_service/include/eloq_basic_catalog_factory.h`; `tx_service/src/eloq_basic_catalog_factory.cpp` |
 | `LocalCcShards` owns current/dirty catalog entries shared by shard catalog records | `tx_service/include/catalog_key_record.h`; `tx_service/include/cc/local_cc_shards.h`; `tx_service/src/cc/local_cc_shards.cpp`; `tx_service/include/cc/catalog_cc_map.h` |
+| Schema images carry resolved table versions, and a rolled-back operation keeps the current schema at its commit timestamp | `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp`; `tx_service/include/catalog_key_record.h`; `tx_service/include/cc/catalog_cc_map.h` |
 | Typed maps reject requests interpreted under a different schema version | `tx_service/include/cc/cc_request.h`; `tx_service/include/cc/template_cc_map.h`; `tx_service/src/tx_execution.cpp` |
 | Sequences use an internal transactional table | `tx_service/include/sequences/sequences.h`; `tx_service/src/sequences/sequences.cpp` |
 | Statistics are schema-bound, assigned across cores/node groups, exchanged, and persisted | `tx_service/include/statistics.h`; `tx_service/include/table_statistics.h`; `tx_service/src/cc/local_cc_shards.cpp` |
