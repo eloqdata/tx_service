@@ -21,7 +21,10 @@
  */
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -30,12 +33,30 @@
 
 namespace EloqDS
 {
+/**
+ * @brief Makes the EloqStore-backed data stores, and owns the one EloqStore
+ * they share.
+ *
+ * The process runs one EloqStore, with one buffer pool, fd budget and local
+ * cache quota, and that store hosts every data shard this node leads: each
+ * EloqStoreDataStore attaches its data shard to the store when the shard is
+ * opened (EloqStore::AttachShard) and detaches it when the shard is closed.
+ * The store starts with the first data store made and stops with the factory.
+ */
 class EloqStoreDataStoreFactory : public DataStoreFactory
 {
 public:
     explicit EloqStoreDataStoreFactory(EloqStoreConfig &&configs)
         : eloq_store_configs_(std::move(configs))
     {
+    }
+
+    ~EloqStoreDataStoreFactory() override
+    {
+        if (store_ != nullptr && !store_->IsStopped())
+        {
+            store_->Stop();
+        }
     }
 
     std::unique_ptr<DataStore> CreateDataStore(
@@ -45,6 +66,10 @@ public:
         bool start_db = true,
         int64_t term = 0) override
     {
+        if (!EnsureStoreStarted())
+        {
+            return nullptr;
+        }
         auto ds =
             std::make_unique<EloqStoreDataStore>(shard_id, data_store_service);
         ds->Initialize();
@@ -134,8 +159,60 @@ public:
         eloq_store_configs_.eloqstore_configs_.enable_local_standby = enable;
     }
 
+    /**
+     * @brief The one EloqStore every data shard's data store sends to.
+     * @return The store; null until the first data store is made.
+     */
+    ::eloqstore::EloqStore *Store() const
+    {
+        return store_.get();
+    }
+
 private:
+    /**
+     * @brief Builds and starts the store on the first call (StartInstance:
+     * the store paths are opened and the worker shards built, with no data
+     * shard attached yet). The options are fixed then, including the standby
+     * settings; later changes to them reach the running store through
+     * EloqStoreDataStore::UpdateStandbyMaster*.
+     * @return Whether the store is running.
+     */
+    bool EnsureStoreStarted();
+
+    /**
+     * @brief The store's partition filter: whether a partition belongs to a
+     * data shard this node hosts, answered by that shard's data store
+     * (EloqStoreDataStore::OwnsPartition) from its buckets.
+     *
+     * Called from the store's threads when a sweep (archive, reopen, branch,
+     * prewarm) runs for a shard; a shard without a data store yet owns
+     * nothing.
+     *
+     * @param ds_shard_id The data shard the sweep runs for.
+     * @param table_ident The partition.
+     * @return Whether the partition is the shard's.
+     */
+    bool OwnsPartition(::eloqstore::DsShardId ds_shard_id,
+                       const ::eloqstore::TableIdent &table_ident) const;
+
+    /**
+     * @brief Lets a data shard's data store answer the filter for its id.
+     * @param shard_id The data shard.
+     * @param data_store Its data store; null to withdraw it.
+     */
+    void RegisterShardStore(uint32_t shard_id, EloqStoreDataStore *data_store);
+
     EloqStoreConfig eloq_store_configs_;
+    /** Serializes the store's lazy start. */
+    std::mutex store_mux_;
+    std::unique_ptr<::eloqstore::EloqStore> store_{nullptr};
+    /**
+     * The data shards' data stores, for the partition filter; each registers
+     * itself for its lifetime. Indexed by data shard id.
+     */
+    std::array<std::atomic<EloqStoreDataStore *>,
+               DataStoreService::kMaxShardCount>
+        shard_stores_{};
 
     friend class EloqStoreDataStore;
 };

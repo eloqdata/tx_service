@@ -121,6 +121,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/reopen_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/background_write.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/batch_write_task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/detach_shard_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/prewarm_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/read_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/scan_task.cpp

@@ -276,6 +276,14 @@ DataStoreService::~DataStoreService()
     {
         it.ShutDown();
     }
+    // The server and workers are gone, so no request reads a data store now.
+    // Destroy them before the members are destroyed in reverse order, since
+    // the factory, declared after the shards, would go first, and the
+    // EloqStore-backed data stores withdraw from it as they are destroyed.
+    for (auto &it : data_shards_)
+    {
+        it.data_store_.reset();
+    }
 }
 
 DataStoreService::ReadSubmitGuard::ReadSubmitGuard(DataStoreService *service,
@@ -372,15 +380,6 @@ bool DataStoreService::StartService(bool create_db_if_missing)
 
     auto dss_shards = cluster_manager_.GetShardsForThisNode();
     LOG(INFO) << "DataStoreService start with shards: " << dss_shards.size();
-
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    if (dss_shards.size() > 1)
-    {
-        LOG(ERROR)
-            << "EloqStore-backed DataStoreService supports at most one shard.";
-        return false;
-    }
-#endif
 
     if (!dss_shards.empty())
     {

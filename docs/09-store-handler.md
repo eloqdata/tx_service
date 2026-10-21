@@ -48,12 +48,16 @@ Startup selects one `DataStoreHandler` implementation at build time:
 The EloqStore engine is a separate submodule with its own architecture
 documentation. At this layer, only its `DataStore` adapter and the
 `DataStoreHandler`/EloqDSS integration contract are authoritative. A node runs
-one EloqStore instance per data shard it leads, each in its own directory in
-cloud mode. RocksDB backends give each data shard a database of its own, but
-EloqStore keeps every shard's partitions side by side, so each instance's
+one EloqStore, owned by the factory and started with the first data store, and
+that store hosts every data shard the node leads: opening a data shard
+attaches it at its term (`EloqStore::AttachShard`) and closing it detaches it,
+while the other shards keep serving, so the node has one buffer pool, fd
+budget and cache quota however many node groups it leads. RocksDB backends
+give each data shard a database of its own, but EloqStore keeps every shard's
+partitions side by side, so each request names its data shard and the
 storage-wide sweeps (cloud prewarm, archives for backups and standby
 snapshots, branches, a global reopen) consult a filter for the partitions of
-its data shard's buckets, set before every start (`SetPartitionBuckets`);
+that shard's buckets, set before every attach (`SetPartitionBuckets`);
 ordinary reads and writes do not.
 
 EloqDSS can run as a separate brpc service or be colocated with the tx service.
@@ -177,7 +181,7 @@ term writable again.
 | EloqDSS owns versioned data shards behind a pluggable `DataStore` interface | `store_handler/eloq_data_store_service/data_store_service.h`; `store_handler/eloq_data_store_service/data_store_service.cpp`; `store_handler/eloq_data_store_service/data_store.h`; `store_handler/eloq_data_store_service/ds_request.proto` |
 | Requests for a `Starting` shard wait on its waiting list | `store_handler/eloq_data_store_service/data_store_service.h`; `store_handler/eloq_data_store_service/data_store_service.cpp` |
 | The client retries at once only when the shard is reachable, and binds data shards to NG leaders by term | `store_handler/data_store_service_client.h`; `store_handler/data_store_service_client.cpp`; `store_handler/data_store_service_client_closure.h`; `store_handler/eloq_data_store_service/data_store_service_config.cpp` |
-| Each EloqStore instance sweeps only its data shard's partitions | `store_handler/eloq_data_store_service/eloq_store_data_store.h`; `store_handler/eloq_data_store_service/eloq_store_data_store.cpp`; `store_handler/eloq_data_store_service/data_store.h` |
+| One EloqStore hosts every data shard the node leads, and sweeps only the partitions of the shard a request names | `store_handler/eloq_data_store_service/eloq_store_data_store_factory.h`; `store_handler/eloq_data_store_service/eloq_store_data_store.h`; `store_handler/eloq_data_store_service/eloq_store_data_store.cpp`; `store_handler/eloq_data_store_service/data_store.h` |
 | Embedded RocksDB implements the same handler contract without DSS transport | `store_handler/rocksdb_handler.h`; `store_handler/rocksdb_handler.cpp` |
 | Checkpoint data sync depends on `PutAll` and the optional persistence barrier | `tx_service/src/cc/local_cc_shards.cpp`; `tx_service/include/data_sync_task.h`; `tx_service/src/data_sync_task.cpp`; `tx_service/src/checkpointer.cpp` |
 | Cache-miss requests are coalesced, retained across retry, and safely recycled or destroyed | `tx_service/include/cc/cc_req_misc.h`; `tx_service/src/cc/cc_req_misc.cpp`; `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp` |
