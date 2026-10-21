@@ -404,9 +404,26 @@ bool UpsertTableOp::RunUntilPrepareLog(TransactionExecution *txm)
     return true;
 }
 
+bool UpsertTableOp::FaultAppliesToTable(const FaultEntry &entry) const
+{
+    return entry.table_name_.empty() ||
+           entry.table_name_ == table_key_.Name().StringView();
+}
+
+void UpsertTableOp::TriggerTableFault(
+    [[maybe_unused]] const std::string &fault_name)
+{
+    CODE_FAULT_INJECTOR(fault_name, {
+        if (FaultAppliesToTable(*fault_entry))
+        {
+            FaultInject::Instance().TriggerAction(fault_entry);
+        }
+    });
+}
+
 bool UpsertTableOp::RunUntilCommitLog(TransactionExecution *txm)
 {
-    ACTION_FAULT_INJECTOR("upsert_table_crash_after_prepare_log");
+    TriggerTableFault("upsert_table_crash_after_prepare_log");
 
     // Installs the dirty schema on every node group, and gets back a local
     // view (pointer) of the committed and dirty schema.
@@ -614,7 +631,7 @@ void UpsertTableOp::RunAfterCommitLog(TransactionExecution *txm)
 {
     // Crashes the node with the commit log written and the op's data store
     // step not yet done, which recovery must roll forward.
-    ACTION_FAULT_INJECTOR("upsert_table_crash_after_commit_log");
+    TriggerTableFault("upsert_table_crash_after_commit_log");
     bool go_on = true;
     switch (op_type_)
     {
@@ -1297,12 +1314,11 @@ void UpsertTableOp::PrepareCreateKvTables(TransactionExecution *txm)
             }
             // Fails the creation once, after the tables are created, so that
             // the create gives up with real tables to drop; then disarms
-            // itself. A table_name parameter aims it at one table: the
-            // server's own creates (its feature document) run beside a
-            // test's and would consume it otherwise.
+            // itself. A table_name parameter aims it at one table
+            // (FaultAppliesToTable); the server's own creates would consume
+            // it otherwise.
             CODE_FAULT_INJECTOR("upsert_table_create_kv_table_fail", {
-                if (fault_entry->table_name_.empty() ||
-                    fault_entry->table_name_ == table_key_.Name().StringView())
+                if (FaultAppliesToTable(*fault_entry))
                 {
                     LOG(INFO)
                         << "FaultInject upsert_table_create_kv_table_fail, "

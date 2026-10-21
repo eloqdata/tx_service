@@ -50,6 +50,7 @@
 
 namespace txservice
 {
+class FaultEntry;
 class TransactionExecution;
 struct ReadTxRequest;
 struct ReadOutsideTxRequest;
@@ -1439,6 +1440,26 @@ private:
      * @param txm The coordinating tx.
      */
     void PrepareCreateKvTables(TransactionExecution *txm);
+
+    /**
+     * @brief Whether an armed fault applies to this op's table: its
+     * table_name parameter is empty or names the table. The server runs its
+     * own DDLs (its feature document) beside a test's, so a fault armed
+     * for a test's table must not fire on them.
+     *
+     * @param entry The armed fault.
+     * @return Whether it applies.
+     */
+    bool FaultAppliesToTable(const FaultEntry &entry) const;
+
+    /**
+     * @brief Runs an armed action fault (crash and the like) if it applies to
+     * this op's table (FaultAppliesToTable); a no-op otherwise, and in builds
+     * without fault injection.
+     *
+     * @param fault_name The fault point.
+     */
+    void TriggerTableFault(const std::string &fault_name);
 
     /**
      * @brief Empties the table's cc maps on every node group
