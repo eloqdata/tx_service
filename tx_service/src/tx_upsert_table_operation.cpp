@@ -1297,14 +1297,21 @@ void UpsertTableOp::PrepareCreateKvTables(TransactionExecution *txm)
             }
             // Fails the creation once, after the tables are created, so that
             // the create gives up with real tables to drop; then disarms
-            // itself.
+            // itself. A table_name parameter aims it at one table: the
+            // server's own creates (its feature document) run beside a
+            // test's and would consume it otherwise.
             CODE_FAULT_INJECTOR("upsert_table_create_kv_table_fail", {
-                LOG(INFO) << "FaultInject upsert_table_create_kv_table_fail, "
-                             "txn: "
-                          << txn;
-                FaultInject::Instance().InjectFault(
-                    "upsert_table_create_kv_table_fail", "remove");
-                succ = false;
+                if (fault_entry->table_name_.empty() ||
+                    fault_entry->table_name_ == table_key_.Name().StringView())
+                {
+                    LOG(INFO)
+                        << "FaultInject upsert_table_create_kv_table_fail, "
+                           "txn: "
+                        << txn;
+                    FaultInject::Instance().InjectFault(
+                        "upsert_table_create_kv_table_fail", "remove");
+                    succ = false;
+                }
             });
             return succ ? CcErrorCode::NO_ERROR : CcErrorCode::DATA_STORE_ERR;
         });
