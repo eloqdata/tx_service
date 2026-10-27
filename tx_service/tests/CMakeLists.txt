@@ -121,6 +121,15 @@ foreach(name ${CATCH_MAIN_TESTS})
     add_substrate_test(${name} Catch2::Catch2WithMain)
 endforeach()
 
+# Exercise real read/acquire/abort/retry on TestNode; bound old memory waits.
+add_executable(PayloadReservation-Test ${TESTS_DIR}/PayloadReservation-Test.cpp)
+target_link_libraries(PayloadReservation-Test PRIVATE
+    test_harness Catch2::Catch2WithMain)
+set_property(TARGET PayloadReservation-Test PROPERTY CXX_STANDARD 20)
+set_property(TARGET PayloadReservation-Test PROPERTY CXX_EXTENSIONS OFF)
+catch_discover_tests(PayloadReservation-Test PROPERTIES
+    LABELS "PayloadReservation-Test" TIMEOUT 60)
+
 foreach(name ${OWN_MAIN_TESTS})
     add_substrate_test(${name} Catch2::Catch2)
 endforeach()

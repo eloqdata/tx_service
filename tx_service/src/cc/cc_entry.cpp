@@ -168,6 +168,18 @@ void LruEntry::ClearLocks(CcShard &ccs,
 
     NonBlockingLock *key_lock = cc_lock_and_extra_->KeyLock();
 
+    // Release any CcShardHeap reservation still attached to this lock before
+    // the lock object is recycled.
+    const size_t reserved = key_lock->TakeReservedBytes();
+    if (reserved != 0)
+    {
+        CcShardHeap *heap = ccs.GetShardHeap();
+        if (heap != nullptr)
+        {
+            heap->ReleaseReservation(reserved);
+        }
+    }
+
     // Deletes the write lock/intent.
     auto [w_tx, w_type] = key_lock->WriteTx();
     if (w_type != NonBlockingLock::WriteLockType::NoWritelock)

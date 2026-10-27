@@ -70,7 +70,10 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
         resp->set_vec_idx(acquire_req.vec_idx());
 
-        if (!cc_res_.IsError())
+        // A nonzero commit_ts denotes an acquired write lock, not merely the
+        // address sent in a blocked-request ACK. Preserve that ownership on OOM
+        // so the coordinator's abort tail can release it.
+        if (!cc_res_.IsError() || cc_res_.Value()[0].commit_ts_ != 0)
         {
             const AcquireKeyResult &acquire_key_res = cc_res_.Value()[0];
 
@@ -127,7 +130,9 @@ void txservice::remote::RemoteAcquire::Reset(
                      req.vec_idx(),
                      ToLocalType::ConvertProtocol(req.protocol()),
                      ToLocalType::ConvertIsolation(req.iso_level()),
-                     req.abort_if_oom());
+                     req.abort_if_oom(),
+                     req.reserve_bytes(),
+                     req.accepts_error_with_write_lock());
 
     input_msg_ = std::move(input_msg);
 

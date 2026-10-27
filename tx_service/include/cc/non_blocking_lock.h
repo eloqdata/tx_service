@@ -87,6 +87,24 @@ public:
         blocking_queue_.Reset();
         queue_block_cmds_.Reset();
         wlock_ts_ = 0;
+        reserved_bytes_ = 0;
+    }
+
+    void SetReservedBytes(size_t bytes)
+    {
+        reserved_bytes_ = bytes;
+    }
+
+    size_t TakeReservedBytes()
+    {
+        size_t bytes = reserved_bytes_;
+        reserved_bytes_ = 0;
+        return bytes;
+    }
+
+    size_t ReservedBytes() const
+    {
+        return reserved_bytes_;
     }
 
     /**
@@ -363,6 +381,10 @@ private:
 
     WriteLockType write_lk_type_{WriteLockType::NoWritelock};
     TxNumber write_txn_{0};
+
+    // CcShardHeap bytes reserved on behalf of the current write-lock owner.
+    // Released when the write lock is released or cleared.
+    size_t reserved_bytes_{0};
 
     // The time when a write tx acquires the write lock on this lock.
     uint64_t wlock_ts_{0};

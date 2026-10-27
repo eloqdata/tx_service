@@ -29,6 +29,7 @@
 #include <chrono>  // std::chrono
 #include <cstdint>
 #include <iomanip>  // std::setprecision
+#include <limits>
 #include <string>
 
 #include "cc/catalog_cc_map.h"
@@ -974,6 +975,15 @@ KeyGapLockAndExtraData *CcShard::NewLock(CcMap *ccm,
 
     KeyGapLockAndExtraData *lk = lock_vec_.at(next_lock_idx_).get();
     assert(!lk->GetUsedStatus());
+    const size_t reserved = lk->KeyLock()->TakeReservedBytes();
+    if (reserved != 0)
+    {
+        CcShardHeap *heap = GetShardHeap();
+        if (heap != nullptr)
+        {
+            heap->ReleaseReservation(reserved);
+        }
+    }
     lk->Reset(ccm, page, entry);
     lk->SetUsedStatus(true);
     used_lock_count_++;
@@ -3206,29 +3216,61 @@ uint32_t CcShardHeap::SetAsDefaultArena()
 #endif
 }
 
-bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
+bool CcShardHeap::GetStats(int64_t *allocated, int64_t *committed) const
 {
+    *allocated = -1;
+    *committed = -1;
 #if defined(WITH_JEMALLOC)
-    // estimate thread memory usage from total process memory
+    // EpochWorker refreshes global statistics periodically. Keep this hot path
+    // read-only to avoid per-request global statistics refresh work.
+    // The limit is soft: installed bytes and tcache activity can be absent from
+    // the current sample even after their payload reservations are released.
     size_t total_resident = 0;
     size_t total_allocated = 0;
-    GetJemallocArenaStat(arena_id_, total_resident, total_allocated);
-
-    if (alloc != nullptr)
+    if (!GetJemallocArenaStat(arena_id_, total_resident, total_allocated) ||
+        total_allocated >
+            static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
+        total_resident >
+            static_cast<size_t>(std::numeric_limits<int64_t>::max()))
     {
-        *alloc = total_allocated;
+        return false;
     }
 
-    if (commit != nullptr)
-    {
-        *commit = total_resident;
-    }
-
-    return total_allocated >= memory_limit_;
-
+    *allocated = static_cast<int64_t>(total_allocated);
+    *committed = static_cast<int64_t>(total_resident);
 #else
-    int64_t allocated, committed;
-    mi_thread_stats(&allocated, &committed);
+    mi_thread_stats(allocated, committed);
+#endif
+    if (*allocated < 0 || *committed < 0)
+    {
+        *allocated = -1;
+        *committed = -1;
+        return false;
+    }
+    return true;
+}
+
+bool CcShardHeap::ExceedsLimit(int64_t allocated, int64_t reserved) const
+{
+    if (allocated < 0 || reserved < 0)
+    {
+        // A negative value means the accounting has already underflowed.
+        // Treat the heap as full so callers stop admitting new work.
+        return true;
+    }
+
+    // Two nonnegative int64_t values sum without overflow in uint64_t.
+    uint64_t used = static_cast<uint64_t>(allocated) +
+                    static_cast<uint64_t>(reserved);
+    return used >= static_cast<uint64_t>(memory_limit_);
+}
+
+bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
+{
+    int64_t allocated = 0;
+    int64_t committed = 0;
+    const bool valid_stats = GetStats(&allocated, &committed);
+
     if (alloc != nullptr)
     {
         *alloc = allocated;
@@ -3239,10 +3281,179 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
         *commit = committed;
     }
 
-    return allocated >= static_cast<int64_t>(memory_limit_) ||
-           (cc_shard_->EnableDefragment() &&
-            committed > static_cast<int64_t>(memory_limit_));
+    if (!valid_stats || ExceedsLimit(allocated, 0))
+    {
+        return true;
+    }
+
+#if defined(WITH_JEMALLOC)
+    return false;
+#else
+    return cc_shard_->EnableDefragment() &&
+           static_cast<uint64_t>(committed) > memory_limit_;
 #endif
+}
+
+bool CcShardHeap::FullWithReservation(int64_t *alloc, int64_t *commit) const
+{
+    int64_t allocated = 0;
+    int64_t committed = 0;
+    const bool valid_stats = GetStats(&allocated, &committed);
+
+    if (alloc != nullptr)
+    {
+        *alloc = allocated;
+    }
+
+    if (commit != nullptr)
+    {
+        *commit = committed;
+    }
+
+    if (!valid_stats ||
+        ExceedsLimit(allocated,
+                     reserved_bytes_.load(std::memory_order_acquire)))
+    {
+        return true;
+    }
+
+#if defined(WITH_JEMALLOC)
+    return false;
+#else
+    return cc_shard_->EnableDefragment() &&
+           static_cast<uint64_t>(committed) > memory_limit_;
+#endif
+}
+
+bool CcShardHeap::TryReserve(size_t bytes)
+{
+    if (bytes == 0)
+    {
+        return true;
+    }
+
+    if (bytes > memory_limit_ ||
+        bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
+    {
+        return false;
+    }
+
+    const uint64_t limit = static_cast<uint64_t>(memory_limit_);
+    const uint64_t requested = static_cast<uint64_t>(bytes);
+    int64_t reserved = reserved_bytes_.load(std::memory_order_relaxed);
+
+    for (;;)
+    {
+        int64_t allocated = 0;
+        int64_t committed = 0;
+        if (!GetStats(&allocated, &committed))
+        {
+            return false;
+        }
+
+        if (reserved < 0 ||
+            requested > static_cast<uint64_t>(
+                            std::numeric_limits<int64_t>::max() - reserved))
+        {
+            // Refuse a corrupt ledger or an unrepresentable reservation sum
+            // before converting bytes or adding to the signed ledger.
+            return false;
+        }
+
+#if defined(WITH_JEMALLOC)
+        (void) committed;
+#else
+        if (cc_shard_->EnableDefragment() &&
+            static_cast<uint64_t>(committed) > memory_limit_)
+        {
+            return false;
+        }
+#endif
+
+        const uint64_t used = static_cast<uint64_t>(allocated) +
+                              static_cast<uint64_t>(reserved);
+        if (used >= limit || requested > limit - used)
+        {
+            return false;
+        }
+
+        if (reserved_bytes_.compare_exchange_weak(
+                reserved,
+                reserved + static_cast<int64_t>(bytes),
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+        {
+            return true;
+        }
+    }
+}
+
+void CcShardHeap::ReleaseReservation(size_t bytes)
+{
+    if (bytes == 0)
+    {
+        return;
+    }
+
+    if (bytes > memory_limit_ ||
+        bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max()))
+    {
+        LOG(ERROR) << "CcShardHeap invalid reservation release: "
+                   << "release=" << bytes << ", limit=" << memory_limit_;
+        return;
+    }
+
+    const int64_t delta = static_cast<int64_t>(bytes);
+    int64_t reserved = reserved_bytes_.load(std::memory_order_relaxed);
+    while (reserved >= delta)
+    {
+        if (reserved_bytes_.compare_exchange_weak(
+                reserved,
+                reserved - delta,
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+        {
+            return;
+        }
+    }
+
+    LOG(ERROR) << "CcShardHeap reservation underflow: reserved=" << reserved
+               << ", release=" << bytes << ", limit=" << memory_limit_;
+}
+
+bool CcShardHeap::HasCapacityFor(size_t bytes) const
+{
+    const uint64_t limit = static_cast<uint64_t>(memory_limit_);
+    const uint64_t requested = static_cast<uint64_t>(bytes);
+
+    int64_t allocated = 0;
+    int64_t committed = 0;
+    if (!GetStats(&allocated, &committed))
+    {
+        return false;
+    }
+    int64_t reserved = reserved_bytes_.load(std::memory_order_acquire);
+
+    if (reserved < 0 ||
+        requested > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() -
+                                          reserved))
+    {
+        return false;
+    }
+
+#if defined(WITH_JEMALLOC)
+    (void) committed;
+#else
+    if (cc_shard_->EnableDefragment() &&
+        static_cast<uint64_t>(committed) > memory_limit_)
+    {
+        return false;
+    }
+#endif
+
+    const uint64_t used = static_cast<uint64_t>(allocated) +
+                          static_cast<uint64_t>(reserved);
+    return used < limit && requested <= limit - used;
 }
 
 bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const

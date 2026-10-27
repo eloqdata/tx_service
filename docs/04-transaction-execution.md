@@ -83,8 +83,12 @@ stage that is irrelevant or was already satisfied while executing a command:
 1. Read-lock the range or bucket metadata that determines placement of every
    write, so routing cannot change underneath commit.
 2. Acquire write ownership for buffered record keys at their local or remote CC
-   shards. Object commands retain the owner-shard write ownership established
-   during execution and acquire any additional forwarding ownership they need.
+   shards, including the destination payload reservation. Capacity refusal
+   completes the acquisition with out-of-memory instead of parking; a lock
+   granted before the refusal stays in the acquire result so abort cleanup
+   releases it ([03](03-concurrency-control.md)). Object commands retain the
+   owner-shard write ownership established during execution and acquire any
+   additional forwarding ownership they need.
 3. Choose a commit timestamp above the transaction's start/lower bound and the
    version, lock, and read-validation bounds returned by touched entries.
 4. Validate optimistic reads and release the data-read ownership that no

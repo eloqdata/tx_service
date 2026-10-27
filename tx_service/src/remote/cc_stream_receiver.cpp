@@ -523,11 +523,24 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (cc_res.error_code() != 0)
         {
-            if (acq_res.cce_addr_.Term() < 0)
+            bool first_response = acq_res.cce_addr_.Term() < 0;
+            if (!cc_res.is_ack() && cc_res.commit_ts() != 0 &&
+                cce_addr_res.cce_lock_ptr() != 0 && cce_addr_res.term() >= 0)
             {
-                acq_res.remote_ack_cnt_->fetch_sub(1);
+                // Publish ownership before completion, including ACK -> OOM.
+                // AggregateAcquiredKeys must include this lock in abort
+                // cleanup.
+                acq_res.cce_addr_.SetCceLock(cce_addr_res.cce_lock_ptr(),
+                                             cce_addr_res.term(),
+                                             cce_addr_res.core_id());
+                acq_res.last_vali_ts_ = cc_res.vali_ts();
+                acq_res.commit_ts_ = cc_res.commit_ts();
             }
-
+            if (first_response)
+            {
+                acq_res.remote_ack_cnt_->fetch_sub(1,
+                                                   std::memory_order_release);
+            }
             acq_res.SetRemoteHdResult(true, std::memory_order_release);
             hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
@@ -1670,26 +1683,19 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 break;
             }
 
-            acq_key_result_vec.at(resp.acq_key_result_vec_idx())
-                .SetRemoteHdResult(true, std::memory_order_release);
-
             AckStatus status = (AckStatus) resp.req_status();
-            if (status == AckStatus::ErrorTerm)
+            if (status == AckStatus::ErrorTerm ||
+                status == AckStatus::Finished)
             {
-                hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);
-            }
-            else if (status == AckStatus::Finished)
-            {
-                // The cc request has been executed or aborted on the remote
-                // node, the result is unknown. Treat it as the response is
-                // lost otherwise txm might block forever if the response is
-                // really lost.
-                hd_res->SetError(CcErrorCode::REQUEST_LOST);
-            }
-            else if (status == AckStatus::BlockQueue)
-            {
-                // The cc request is still in blocking queue. The txm
-                // should keep waiting.
+                // Only a terminal probe consumes the remote request reference.
+                // A BlockQueue probe is not the acquire result: publishing the
+                // flag for it would discard the eventual success/OOM response
+                // and prevent transaction-wide abort from ever running.
+                acq_key_result_vec.at(resp.acq_key_result_vec_idx())
+                    .SetRemoteHdResult(true, std::memory_order_release);
+                hd_res->SetRemoteError(status == AckStatus::ErrorTerm
+                                           ? CcErrorCode::NG_TERM_CHANGED
+                                           : CcErrorCode::REQUEST_LOST);
             }
             hd_res->UnsetBlockReqCheckTs();
 

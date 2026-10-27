@@ -47,7 +47,10 @@ three stable patterns:
   requester to the fetch operation until backfill completes;
 - memory pressure transfers the request to a shard wait list while eviction or
   checkpoint progress makes admission possible, unless the caller requested an
-  immediate out-of-memory failure.
+  immediate out-of-memory failure. Commit-path write acquisition is an exception:
+  entry admission and payload-reservation failure complete with out-of-memory
+  instead of parking, because other keys may already hold the transaction's
+  reservations.
 
 In all cases, waiting occurs outside `Execute()`. A resumed request continues
 with the lock, fetch result, or admission opportunity granted by the component
@@ -101,6 +104,16 @@ post-write requests install the committed value or discard the pending value,
 then release the write lock and wake waiters. Object-command maps use the same
 lock lifecycle but apply and commit engine commands against shard-owned
 objects.
+
+Record writes also reserve the source record's `MemUsage()` on every destination
+shard before WAL, attaching the charge to the granted write lock. Post-write
+materialization, abort, and term cleanup release the charge; taking it clears it
+so cleanup cannot release it twice. A write that cannot reserve completes with
+out-of-memory while retaining the lock granted before the failure, so the
+coordinator's abort tail releases it. Admission counts outstanding reservations,
+so a shard can refuse writes while physical allocation is below the cleaning
+watermark. The budget is a soft limit over periodically sampled allocator
+statistics, not a hard process RSS or installation-peak guarantee.
 
 Scanners are batched cursors over memory and, when needed, persistent data.
 They retain the intents or locks needed to keep continuation points valid and

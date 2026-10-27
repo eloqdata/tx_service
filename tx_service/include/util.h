@@ -28,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <queue>
 #include <sstream>
@@ -451,29 +452,40 @@ static inline bool IsStandbyTx(int64_t tx_term)
 }
 
 #if defined(WITH_JEMALLOC)
-static inline void GetJemallocArenaStat(uint32_t arena_id,
+/**
+ * Read the current arena snapshot without refreshing the global epoch. Return
+ * false on query failure or overflow and leave outputs unchanged.
+ */
+static inline bool GetJemallocArenaStat(uint32_t arena_id,
                                         size_t &resident,
                                         size_t &allocated)
 {
-    // estimate thread memory usage from total process memory
     size_t total_resident = 0;
     size_t small_allocated = 0;
     size_t large_allocated = 0;
     size_t sz = sizeof(total_resident);
 
-    // uint64_t epoch = 1;
-    // mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
-
     char mib[64];
     snprintf(mib, sizeof(mib), "stats.arenas.%u.resident", arena_id);
-    mallctl(mib, &total_resident, &sz, NULL, 0);
+    if (mallctl(mib, &total_resident, &sz, nullptr, 0) != 0)
+    {
+        return false;
+    }
     snprintf(mib, sizeof(mib), "stats.arenas.%u.small.allocated", arena_id);
-    mallctl(mib, &small_allocated, &sz, NULL, 0);
+    if (mallctl(mib, &small_allocated, &sz, nullptr, 0) != 0)
+    {
+        return false;
+    }
     snprintf(mib, sizeof(mib), "stats.arenas.%u.large.allocated", arena_id);
-    mallctl(mib, &large_allocated, &sz, NULL, 0);
+    if (mallctl(mib, &large_allocated, &sz, nullptr, 0) != 0 ||
+        small_allocated > std::numeric_limits<size_t>::max() - large_allocated)
+    {
+        return false;
+    }
 
     resident = total_resident;
     allocated = small_allocated + large_allocated;
+    return true;
 }
 #endif
 // TSC frequency in cycles per microsecond (measured at initialization)

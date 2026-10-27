@@ -46,6 +46,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     uint32_t command_id,
     uint64_t ts,
     bool is_insert,
+    size_t reserve_bytes,
     CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
     uint32_t hd_res_idx,
     CcProtocol proto,
@@ -86,6 +87,8 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_ts(ts);
     acq->set_schema_version(schema_version);
     acq->set_insert(is_insert);
+    acq->set_reserve_bytes(reserve_bytes);
+    acq->set_accepts_error_with_write_lock(true);
     acq->set_key_shard_code(key_shard_code);
     acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
     acq->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));

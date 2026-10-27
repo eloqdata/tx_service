@@ -819,11 +819,20 @@ message AcquireRequest {
     IsolationType iso_level = 11;
     uint64 schema_version = 12;
     bool abort_if_oom = 13;
+    // Bytes to reserve in the destination CcShardHeap for the payload that
+    // will be installed by the matching PostWrite request.
+    uint64 reserve_bytes = 14;
+    // The coordinator consumes cce_addr/commit_ts even on a final error.
+    // Without this capability, budgeted acquires are rejected before locking.
+    bool accepts_error_with_write_lock = 15;
 }
 
 message AcquireResponse {
     int32 error_code = 1;
     uint64 vali_ts = 2;
+    // A nonzero commit_ts on a final result transfers write-lock ownership,
+    // including OUT_OF_MEMORY, when the request advertised that capability.
+    // An ACK carries only an address, not an acquired write lock.
     uint64 commit_ts = 3;
     CceAddr_msg cce_addr = 4;
     // The response is an acknowledgement or the result

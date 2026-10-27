@@ -217,6 +217,15 @@ public:
             return true;
         }
 
+        // Older coordinators discard lock ownership on error responses. Refuse
+        // budgeted requests before any upgrade unless the sender can clean up
+        // an acquired write lock returned with OUT_OF_MEMORY.
+        if (req.ReserveBytes() > 0 && !req.AcceptsErrorWithWriteLock())
+        {
+            hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+            return true;
+        }
+
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
         if (req.CcePtr() != nullptr)
@@ -336,10 +345,13 @@ public:
 
                 if (cce_ptr == nullptr)
                 {
-                    // The acquire request needs a new cc entry but the cc map
-                    // has reached the maximal capacity.
-                    shard_->EnqueueWaitListIfMemoryFull(&req);
-                    return false;
+                    // Acquire is a pre-WAL stage. Even a delete/command with
+                    // no payload budget can be part of a transaction that
+                    // already holds reservations on other keys or shards.
+                    // Finish this request and let the coordinator abort instead
+                    // of adding an invisible memory-dependency edge.
+                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
                 }
 
                 assert(cce_ptr != nullptr);
@@ -407,6 +419,36 @@ public:
                 curr_version_ts =
                     curr_version_ts > 0 ? curr_version_ts : shard_->Now();
                 acquire_key_result.commit_ts_ = curr_version_ts;
+
+                // Reserve CcShardHeap bytes for the payload that PostWrite
+                // will install after WAL commit. This covers primary,
+                // secondary, and unique-secondary record writes. Shell/key/page
+                // allocations are sampled separately by the heap's physical
+                // statistics; this charge estimates only the source payload.
+                if (req.ReserveBytes() > 0 &&
+                    cc_entry.GetKeyLock()->ReservedBytes() == 0)
+                {
+                    CcShardHeap *heap = shard_->GetShardHeap();
+                    if (heap != nullptr && heap->TryReserve(req.ReserveBytes()))
+                    {
+                        cc_entry.GetKeyLock()->SetReservedBytes(
+                            req.ReserveBytes());
+                    }
+                    else
+                    {
+                        // An upgrade may have consumed a read lock/intent
+                        // whose address is still in the coordinator's read set.
+                        // Keep the acquired lock and publish its result even on
+                        // OOM. AggregateAcquiredKeys transfers ownership to the
+                        // write set, and the normal abort tail releases it.
+                        // Never wait here: other keys/shards may already hold
+                        // reservations needed to finish this acquire stage.
+                        shard_->WakeUpShardCleanCc();
+                        hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                        return true;
+                    }
+                }
+
                 if (cce_ptr->PayloadStatus() == RecordStatus::Unknown)
                 {
                     if (txservice_enable_key_cache && table_name_.IsBase())
@@ -9518,10 +9560,9 @@ protected:
         }
 
         if (shard_heap != nullptr &&
-            shard_heap->Full(&heap_alloc, &heap_commit))
+            shard_heap->FullWithReservation(&heap_alloc, &heap_commit))
         {
-            if (txservice_enable_cache_replacement &&
-                shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+            if (txservice_enable_cache_replacement)
             {
                 // The shard has reached the maximal capacity. Tries to clean cc
                 // entries that have been checkpointed but are not being
@@ -9835,10 +9876,9 @@ protected:
         }
 
         if (shard_heap != nullptr &&
-            shard_heap->Full(&heap_alloc, &heap_commit))
+            shard_heap->FullWithReservation(&heap_alloc, &heap_commit))
         {
-            if (txservice_enable_cache_replacement &&
-                shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+            if (txservice_enable_cache_replacement)
             {
                 // The shard has reached the maximal capacity. Tries to clean cc
                 // entries that have been checkpointed but are not being
