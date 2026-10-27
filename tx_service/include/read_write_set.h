@@ -296,6 +296,10 @@ public:
                          OperationType op_type,
                          bool check_unique = false)
     {
+        if (op_type == OperationType::Delete)
+        {
+            rec.reset();
+        }
         // Check write set bytes count.
         wset_bytes_cnt_ += ((tx_key.KeyPtr() ? tx_key.SerializedLength() : 0) +
                             (rec.get() ? rec.get()->SerializedLength() : 0));
