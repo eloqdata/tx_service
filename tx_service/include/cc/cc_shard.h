@@ -230,8 +230,34 @@ public:
 
     uint32_t SetAsDefaultArena();
 
-    // Check if this heap is full
+    // Check if this heap is full. The check uses only physically allocated
+    // bytes; the optional output arguments also report the physical allocator
+    // statistics, or -1 if unavailable. Does not refresh jemalloc's epoch.
     bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
+
+    // Check sampled physical bytes plus outstanding payload reservations.
+    // Jemalloc uses EpochWorker's periodic sample, so this is a soft limit.
+    // Outputs remain physical-only; query failure reports -1 and returns full.
+    bool FullWithReservation(int64_t *alloc = nullptr,
+                             int64_t *commit = nullptr) const;
+
+    // Atomically reserve @p bytes against the heap limit using sampled stats.
+    // Returns false on query failure, ledger overflow, or insufficient
+    // capacity.
+    bool TryReserve(size_t bytes);
+
+    // Release a reservation previously acquired with TryReserve(). It is an
+    // accounting error to release more bytes than are currently reserved.
+    void ReleaseReservation(size_t bytes);
+
+    // Check capacity using sampled stats, without changing reservations.
+    // Query failure or an unrepresentable reservation returns false.
+    bool HasCapacityFor(size_t bytes) const;
+
+    int64_t ReservedBytes() const
+    {
+        return reserved_bytes_.load(std::memory_order_acquire);
+    }
 
     bool NeedCleanShard(int64_t &alloc, int64_t &commit) const;
 
@@ -271,9 +297,23 @@ public:
     }
 
 private:
+    /**
+     * Read allocator statistics without refreshing jemalloc's global epoch.
+     * EpochWorker supplies periodic samples; admission does not force updates.
+     * On query failure, return false and report -1, never zero.
+     */
+    bool GetStats(int64_t *allocated, int64_t *committed) const;
+
+    // True when uint64(allocated) + uint64(reserved) >= memory_limit_.
+    bool ExceedsLimit(int64_t allocated, int64_t reserved) const;
+
     CcShard *cc_shard_{nullptr};
     mi_heap_t *heap_{nullptr};
     const size_t memory_limit_{0};
+    // Bytes reserved by TryReserve() for payloads that have not been copied
+    // into CCEs yet. FullWithReservation() adds this to the physical
+    // allocated bytes before comparing with memory_limit_.
+    std::atomic<int64_t> reserved_bytes_{0};
     size_t last_failed_collect_ts_{0};
 
     // defrag heap cc for this shard
@@ -414,6 +454,11 @@ public:
 
     size_t WaitListSizeForMemory();
 
+    /**
+     * Schedule the single cleaner from this shard's execution context only.
+     * InUse/Use and the scheduler's Free are serialized by that context;
+     * background threads must enqueue a shard request instead of calling here.
+     */
     void WakeUpShardCleanCc();
 
     /**

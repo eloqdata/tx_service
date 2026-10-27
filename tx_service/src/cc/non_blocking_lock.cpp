@@ -397,6 +397,18 @@ bool NonBlockingLock::ReleaseWriteLock(TxNumber tx_number,
         return false;
     }
 
+    const size_t reserved = TakeReservedBytes();
+    if (reserved != 0 && ccs != nullptr)
+    {
+        CcShardHeap *heap = ccs->GetShardHeap();
+        if (heap != nullptr)
+        {
+            heap->ReleaseReservation(reserved);
+            // Re-check memory waiters now that reserved capacity is free.
+            ccs->WakeUpShardCleanCc();
+        }
+    }
+
     write_lk_type_ = WriteLockType::NoWritelock;
     write_txn_ = 0;
 
@@ -490,6 +502,18 @@ bool NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
     if (write_lk_type_ != WriteLockType::WriteIntent || write_txn_ != tx_number)
     {
         return false;
+    }
+
+    const size_t reserved = TakeReservedBytes();
+    if (reserved != 0 && ccs != nullptr)
+    {
+        CcShardHeap *heap = ccs->GetShardHeap();
+        if (heap != nullptr)
+        {
+            heap->ReleaseReservation(reserved);
+            // Re-check memory waiters now that reserved capacity is free.
+            ccs->WakeUpShardCleanCc();
+        }
     }
 
     write_lk_type_ = WriteLockType::NoWritelock;
@@ -594,6 +618,19 @@ LockType NonBlockingLock::ClearTx(TxNumber tx_number,
         auto return_type = write_lk_type_ == WriteLockType::WriteLock
                                ? LockType::WriteLock
                                : LockType::WriteIntent;
+
+        const size_t reserved = TakeReservedBytes();
+        if (reserved != 0 && ccs != nullptr)
+        {
+            CcShardHeap *heap = ccs->GetShardHeap();
+            if (heap != nullptr)
+            {
+                heap->ReleaseReservation(reserved);
+                // Re-check memory waiters now that reserved capacity is
+                // free.
+                ccs->WakeUpShardCleanCc();
+            }
+        }
 
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;

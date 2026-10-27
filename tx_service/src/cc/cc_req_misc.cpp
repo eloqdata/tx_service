@@ -1669,102 +1669,77 @@ void RestoreCcMapCc::DecodedDataItem(
 bool ShardCleanCc::Execute(CcShard &ccs)
 {
     CcShardHeap *shard_heap = ccs.GetShardHeap();
-    int64_t heap_alloc, heap_commit;
-    if (shard_heap != nullptr && shard_heap->Full(&heap_alloc, &heap_commit))
+    if (shard_heap != nullptr && shard_heap->FullWithReservation())
     {
         assert(txservice_enable_cache_replacement);
-        bool need_yield = false;
-        if (shard_heap->NeedCleanShard(heap_alloc, heap_commit))
-        {
-            size_t free_size = 0;
-            std::tie(free_size, need_yield) = ccs.Clean();
-            free_count_ += free_size;
-        }
+        // Reservations can exhaust admission capacity below the physical
+        // cleaning watermark. Scan clean entries in that case too.
+        auto [free_size, need_yield] = ccs.Clean();
+        free_count_ += free_size;
 
-        if (shard_heap->Full(&heap_alloc, &heap_commit) &&
-            shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+        if (shard_heap->FullWithReservation())
         {
             if (need_yield)
             {
-                // Continue to clean in the next run one round.
                 ccs.Enqueue(this);
                 return false;
             }
-            else
+
+            // Reached the tail ccpage with the effective heap still above the
+            // threshold. Abort only the parked requests that opted in via
+            // AbortIfOom() -- txs holding range read locks, which would
+            // deadlock reclaim by blocking the very data sync that frees
+            // memory. Ordinary requests stay parked until eviction or a flush
+            // makes room.
+            ccs.AbortRequestsAfterMemoryFree();
+
+            // Notify the checkpointer thread to do checkpoint if there are no
+            // freeable entries to be kicked out from ccmap and if the shard is
+            // not doing defrag.
+            if (free_count_ == 0 && !shard_heap->IsDefragHeapCcOnFly() &&
+                !Sharder::Instance().GetCheckpointer()->IsOngoingDataSync())
             {
-                // Reached the tail ccpage with the allocated memory still
-                // above the heap threshold. Abort only the parked requests
-                // that opted in via AbortIfOom() -- txs holding range read
-                // locks, which would deadlock reclaim by blocking the very
-                // data sync that frees memory. Ordinary requests stay parked
-                // until eviction or a flush makes room.
-                ccs.AbortRequestsAfterMemoryFree();
-
-                // Notify the checkpointer thread to do checkpoint if there
-                // is not freeable entries to be kicked out from ccmap and
-                // if the shard is not doing defrag.
-                if (free_count_ == 0 && !shard_heap->IsDefragHeapCcOnFly() &&
-                    !Sharder::Instance().GetCheckpointer()->IsOngoingDataSync())
-                {
-                    ccs.NotifyCkpt(true, "memory_pressure");
-                }
-
-                free_count_ = 0;
-
-                // This pass decided there was nothing to free from state it
-                // gathered before any wake-up that arrived while it ran -- a
-                // checkpoint flush turning dirty entries evictable, say. Such
-                // a wake-up could not be delivered because this request was in
-                // use, so re-run rather than stopping with requests parked and
-                // nothing left to schedule another pass.
-                if (ccs.TakeShardCleanCcWakeUp() &&
-                    ccs.WaitListSizeForMemory() > 0)
-                {
-                    ccs.Enqueue(this);
-                    return false;
-                }
-
-                // Return true will set the request as free, which means the
-                // request is not in working state.
-                return true;
+                // This only helps future attempts. Dispatch completion is not
+                // a flush barrier, and must not control transaction completion.
+                ccs.NotifyCkpt(true, "memory_pressure");
             }
-        }
-        else
-        {
-            // Get the free memory, re-run a batch of the waiting ccrequest.
-            bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
-            if (!wait_list_empty)
+            free_count_ = 0;
+
+            // This pass decided there was nothing to free from state it
+            // gathered before any wake-up that arrived while it ran -- a
+            // checkpoint flush turning dirty entries evictable, say. Such a
+            // wake-up could not be delivered because this request was in use,
+            // so re-run rather than stopping with requests parked and nothing
+            // left to schedule another pass.
+            if (ccs.TakeShardCleanCcWakeUp() &&
+                ccs.WaitListSizeForMemory() > 0)
             {
                 ccs.Enqueue(this);
+                return false;
             }
 
-            // Reset the value if the ccrequest is finished.
-            free_count_ = (wait_list_empty) ? 0 : free_count_;
-            if (wait_list_empty)
-            {
-                // Nothing is parked any more, so a wake-up that arrived during
-                // this pass has already been served.
-                ccs.TakeShardCleanCcWakeUp();
-            }
-            return wait_list_empty;
+            // Return true will set the request as free, which means the
+            // request is not in working state.
+            return true;
         }
+    }
+
+    // There is available memory on this shard, re-run a batch of the waiting
+    // ccrequest if has any waiting request, otherwise, finish this shard clean
+    // ccrequests.
+    bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
+    if (!wait_list_empty)
+    {
+        ccs.Enqueue(this);
     }
     else
     {
-        // There is available memory on this shard, re-run a batch of the
-        // waiting ccrequest if has any waiting request, otherwise, finish
-        // this shard clean ccrequests.
-        bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
-        if (!wait_list_empty)
-        {
-            ccs.Enqueue(this);
-        }
-        else
-        {
-            ccs.TakeShardCleanCcWakeUp();
-        }
-        return wait_list_empty;
+        free_count_ = 0;
+        // Nothing is parked any more, so a wake-up that arrived during this
+        // pass has already been served.
+        ccs.TakeShardCleanCcWakeUp();
     }
+    return wait_list_empty;
 }
 
 void FetchTableRangeSizeCc::Reset(const TableName &table_name,

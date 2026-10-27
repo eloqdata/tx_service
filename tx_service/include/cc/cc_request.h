@@ -374,6 +374,7 @@ public:
                int64_t tx_term,
                uint64_t ts,
                bool is_insert,
+               size_t reserve_bytes,
                CcHandlerResult<std::vector<AcquireKeyResult>> *res,
                uint32_t hd_res_idx,
                CcProtocol proto,
@@ -390,6 +391,8 @@ public:
         ts_ = ts;
         schema_version_ = schema_version;
         is_insert_ = is_insert;
+        reserve_bytes_ = reserve_bytes;
+        accepts_error_with_write_lock_ = true;
         cce_ptr_ = nullptr;
         hd_result_idx_ = hd_res_idx;
         is_local_ = true;
@@ -409,7 +412,9 @@ public:
                uint32_t hd_res_idx,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool abort_if_oom)
+               bool abort_if_oom,
+               size_t reserve_bytes = 0,
+               bool accepts_error_with_write_lock = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
@@ -421,6 +426,8 @@ public:
         ts_ = ts;
         schema_version_ = schema_version;
         is_insert_ = is_insert;
+        reserve_bytes_ = reserve_bytes;
+        accepts_error_with_write_lock_ = accepts_error_with_write_lock;
         cce_ptr_ = nullptr;
         hd_result_idx_ = hd_res_idx;
         is_local_ = false;
@@ -451,6 +458,20 @@ public:
     bool IsInsert() const
     {
         return is_insert_;
+    }
+
+    size_t ReserveBytes() const
+    {
+        return reserve_bytes_;
+    }
+
+    /**
+     * Whether the coordinator consumes acquired-lock metadata on an error.
+     * Required for retaining a write lock until transaction-wide OOM cleanup.
+     */
+    bool AcceptsErrorWithWriteLock() const
+    {
+        return accepts_error_with_write_lock_;
     }
 
     uint32_t KeyShardCode() const
@@ -500,6 +521,8 @@ private:
     uint64_t ts_;
     uint64_t schema_version_;
     bool is_insert_;
+    size_t reserve_bytes_{0};
+    bool accepts_error_with_write_lock_{false};
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
     // blocked due to conflicts in 2PL. After the request is unblocked and

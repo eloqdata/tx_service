@@ -56,6 +56,7 @@ public:
                       uint32_t command_id,
                       uint64_t ts,
                       bool is_insert,
+                      size_t reserve_bytes,
                       CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
                       uint32_t hd_res_idx,
                       CcProtocol proto = CcProtocol::OCC,

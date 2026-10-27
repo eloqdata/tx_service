@@ -3928,6 +3928,9 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         {
             acquire_write.acquire_write_entries_[entry_idx++] = &write_entry;
 
+            const size_t reserve_bytes =
+                write_entry.rec_ ? write_entry.rec_->MemUsage() : 0;
+
             // TODO: enable is_insert after Serializable Isolation is
             // supported.
             cc_handler_->AcquireWrite(
@@ -3940,6 +3943,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 command_id_.load(std::memory_order_relaxed),
                 current_ts,
                 false,
+                reserve_bytes,
                 acquire_write.hd_result_,
                 res_idx++,
                 protocol_,
@@ -3958,6 +3962,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                     command_id_.load(std::memory_order_relaxed),
                     current_ts,
                     false,
+                    reserve_bytes,
                     acquire_write.hd_result_,
                     res_idx++,
                     protocol_,
@@ -7280,6 +7285,7 @@ void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
                 command_id_.load(std::memory_order_relaxed),
                 current_ts,
                 false,
+                0,
                 forward_acquire.hd_result_,
                 res_idx++,
                 protocol_,
