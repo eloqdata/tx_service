@@ -1337,9 +1337,18 @@ std::vector<std::string> LogStateRocksDBCloudImpl::WriteSnapshot(
         res.emplace_back("nginfo_and_catalog");
 
         {
+            // Checked like the other files: a snapshot published with a
+            // truncated history would lose DDL records on the follower.
             auto path = snapshot_path + "/" + kCdcDdlHistoryFile;
             std::ofstream os(path.c_str(), std::ios::binary);
             WriteSnapshotCdcDdlHistoryTo(os);
+            os.close();
+            if (!os)
+            {
+                LOG(ERROR) << "Failed to write snapshot CDC DDL history: "
+                           << path;
+                return {};
+            }
         }
         res.emplace_back(kCdcDdlHistoryFile);
 
@@ -1347,6 +1356,12 @@ std::vector<std::string> LogStateRocksDBCloudImpl::WriteSnapshot(
             auto path = snapshot_path + "/" + kClusterGateFile;
             std::ofstream os(path.c_str(), std::ios::binary);
             WriteSnapshotClusterGateTo(os);
+            os.close();
+            if (!os)
+            {
+                LOG(ERROR) << "Failed to write snapshot cluster gate: " << path;
+                return {};
+            }
         }
         res.emplace_back(kClusterGateFile);
 

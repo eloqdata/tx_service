@@ -53,7 +53,10 @@ public:
             8,
             64 * 1024 * 1024,
             1);
-        files_ = {"nginfo_and_catalog", "in_mem_data_log"};
+        files_ = {"nginfo_and_catalog",
+                  "cdc_ddl_history",
+                  "cluster_gate",
+                  "in_mem_data_log"};
 #elif defined(LOG_STATE_TYPE_MEM)
         state_ = std::make_unique<txlog::LogStateMemoryImpl>();
         files_ = {"data"};
@@ -140,7 +143,10 @@ CATCH_TEST_CASE(
 {
     SnapshotFixture fixture(GENERATE(size_t{4}, size_t{16384}));
 #if defined(LOG_STATE_TYPE_RKDB_CLOUD)
-    const auto file = GENERATE("nginfo_and_catalog", "in_mem_data_log");
+    const auto file = GENERATE("nginfo_and_catalog",
+                               "cdc_ddl_history",
+                               "cluster_gate",
+                               "in_mem_data_log");
 #else
     const auto file = "data";
 #endif
