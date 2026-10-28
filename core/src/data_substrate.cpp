@@ -20,6 +20,7 @@
  *
  */
 
+#include <bthread/bthread.h>
 #include <gflags/gflags.h>
 #include <sys/sysinfo.h>
 
@@ -89,6 +90,35 @@ const auto NUM_VCPU = std::thread::hardware_concurrency();
 
 // Static mutex for protecting initialization state
 static std::mutex instance_mutex_;
+
+namespace
+{
+#ifdef ELOQ_MODULE_ENABLED
+/**
+ * @brief Starts brpc's bthread workers if none runs yet, by running one
+ * bthread to completion.
+ *
+ * With ELOQ_MODULE_ENABLED, EloqStore's shards run on the bthread workers as
+ * a brpc module, so a request to EloqStore completes only once workers exist.
+ * Attaching a data shard in cloud mode is such a request, made while the
+ * storage handler starts. A serving node has started the workers by then, its
+ * brpc servers and clients having run bthreads; a bootstrap may have started
+ * none, and would wait on the attach forever.
+ * @return true if the workers run.
+ */
+bool EnsureBthreadWorkers()
+{
+    bthread_t tid;
+    if (bthread_start_background(
+            &tid, nullptr, [](void *) -> void * { return nullptr; }, nullptr) !=
+        0)
+    {
+        return false;
+    }
+    return bthread_join(tid, nullptr) == 0;
+}
+#endif
+}  // namespace
 
 DataSubstrate &DataSubstrate::Instance()
 {
@@ -190,6 +220,16 @@ bool DataSubstrate::Start()
     {
         instance.log_server_->EnableMetrics(instance.metrics_registry_.get(),
                                             instance.tx_service_common_labels_);
+    }
+#endif
+
+#ifdef ELOQ_MODULE_ENABLED
+    // The storage handler's first EloqStore requests need running bthread
+    // workers (EnsureBthreadWorkers).
+    if (!EnsureBthreadWorkers())
+    {
+        LOG(ERROR) << "Failed to start the bthread workers";
+        return false;
     }
 #endif
 
