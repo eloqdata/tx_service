@@ -7,6 +7,7 @@
  */
 
 #include <gflags/gflags.h>
+#include <mimalloc.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -34,6 +35,7 @@
 #define private public
 #include "cc/local_cc_shards.h"
 #undef private
+#include "cc/template_cc_map.h"
 #include "data_store_service_client_closure.h"
 #include "data_sync_task.h"
 #include "eloq_basic_catalog_factory.h"
@@ -43,6 +45,8 @@
 #include "harness/port_util.h"
 #include "harness/test_node.h"
 #include "include/mock/mock_catalog_factory.h"
+
+DECLARE_uint64(shard_clean_release_kb);
 
 using namespace std::chrono_literals;
 using namespace txservice;
@@ -150,6 +154,154 @@ private:
     LocalCcShards local_shards_;
     CcShard *shard_{nullptr};
 };
+
+#ifndef WITH_JEMALLOC
+/** Heap memory a fixture owns, allocated and freed through mimalloc so the
+ *  shard heap accounts for it. */
+using CleanerBuffer = std::unique_ptr<void, decltype(&mi_free)>;
+
+/**
+ * A map of LRU pages for exercising the shard cleaner against real heap
+ * accounting and the production LRU and scheduling loop.
+ *
+ * Each page owns a fixed, deterministic number of reclaimable bytes. Entry
+ * eligibility is covered by the CC-map tests; here each page represents one
+ * already-durable allocation, or, when not evictable, one the sweep visits but
+ * must leave on the chain, like a dirty, locked or pinned page in production.
+ */
+class CleanerPages
+    : public TemplateCcMap<CompositeKey<int>, CompositeRecord<int>, true, true>
+{
+    /** One LRU page owning 64 KB of heap memory, the bytes its eviction
+     *  reclaims. */
+    struct Page : LruPage
+    {
+        /**
+         * Allocates the page's memory.
+         * @param map The map the page belongs to.
+         */
+        explicit Page(CcMap *map)
+            : LruPage(map), buffer(mi_malloc(64 * 1024), &mi_free)
+        {
+        }
+        CleanerBuffer buffer;  ///< Freed when the page is evicted.
+    };
+
+public:
+    /**
+     * Creates @p count pages and appends them to the shard's LRU chain.
+     * @param shard The shard whose LRU chain and heap the pages live on.
+     * @param count The number of pages to create.
+     * @param evictable Whether a sweep may evict the pages; when false the
+     *        sweep visits them and leaves them on the chain.
+     */
+    CleanerPages(CcShard &shard, size_t count, bool evictable = true)
+        : TemplateCcMap(&shard,
+                        0,
+                        TableName(std::string_view("cleaner_pages"),
+                                  TableType::Primary,
+                                  TableEngine::EloqDoc),
+                        1),
+          owner_(shard),
+          evictable_(evictable)
+    {
+        pages_.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+        {
+            pages_.push_back(std::make_unique<Page>(this));
+            REQUIRE(pages_.back()->buffer != nullptr);
+            owner_.UpdateLruList(pages_.back().get(), true);
+        }
+    }
+
+    /** Detaches the pages still on the LRU chain and resets the cleaner's
+     *  cursor, which may point at one of them. */
+    ~CleanerPages() override
+    {
+        for (auto &page : pages_)
+        {
+            if (page->lru_next_ != nullptr)
+            {
+                owner_.DetachLru(page.get());
+            }
+        }
+        owner_.ResetCleanStart();
+    }
+
+    /**
+     * The sweep's visit of one page: evicts it when the pages are evictable,
+     * otherwise leaves it on the chain.
+     * @param page The page the sweep is at.
+     * @return The number of pages reclaimed (1 or 0) and the next page.
+     */
+    std::pair<size_t, LruPage *> CleanPageAndReBalance(
+        LruPage *page, KickoutCcEntryCc * = nullptr, bool * = nullptr) override
+    {
+        LruPage *next = page->lru_next_;
+        ++visited_;
+        if (!evictable_)
+        {
+            return {0, next};
+        }
+        static_cast<Page *>(page)->buffer.reset();
+        owner_.DetachLru(page);
+        ++cleaned_;
+        return {1, next};
+    }
+
+    /** @return The number of pages evicted so far. */
+    size_t Cleaned() const
+    {
+        return cleaned_;
+    }
+
+    /** @return The number of pages the sweep visited, evicted or not. */
+    size_t Visited() const
+    {
+        return visited_;
+    }
+
+private:
+    CcShard &owner_;                            ///< The shard the pages are on.
+    const bool evictable_;                      ///< Whether a sweep may evict.
+    std::vector<std::unique_ptr<Page>> pages_;  ///< Every page created.
+    size_t cleaned_{0};                         ///< Pages evicted so far.
+    size_t visited_{0};                         ///< Pages the sweep visited.
+};
+
+/**
+ * Allocates heap memory until the shard heap is at @p ratio of its limit.
+ * @param heap The shard heap to fill.
+ * @param ratio The fraction of the limit to reach; above 1.0 puts the heap
+ *        over its hard limit.
+ * @return The buffers holding that memory; dropping them frees it.
+ */
+std::vector<CleanerBuffer> FillCleanerHeap(CcShardHeap &heap, double ratio)
+{
+    std::vector<CleanerBuffer> buffers;
+    const int64_t target = static_cast<int64_t>(heap.MemoryLimit() * ratio);
+    int64_t allocated = 0;
+    heap.Full(&allocated);
+    REQUIRE(allocated < target);
+    while (allocated < target)
+    {
+        buffers.emplace_back(mi_malloc(8192), &mi_free);
+        REQUIRE(buffers.back() != nullptr);
+        heap.Full(&allocated);
+    }
+    return buffers;
+}
+
+/** Puts the cleaner's release threshold back when the test ends. */
+struct RestoreReleaseKb
+{
+    uint64_t previous = FLAGS_shard_clean_release_kb;  ///< Saved value.
+    ~RestoreReleaseKb()
+    {
+        FLAGS_shard_clean_release_kb = previous;
+    }
+};
+#endif
 
 class Watchdog
 {
@@ -456,71 +608,559 @@ TEST_CASE("CcRequestList preserves intrusive links across every removal shape",
     REQUIRE_FALSE(second.InUse());
 }
 
-TEST_CASE("shard cleaner preserves a wake received during an active pass",
-          "[checkpoint-flush][shard-clean][sticky-wake]")
+TEST_CASE("parks and wake-ups for an in-use cleaner only count and join",
+          "[checkpoint-flush][shard-clean]")
 {
     // These requests outlive local_shards, whose unprocessed queue retains
     // their addresses until fixture teardown.
-    ShardRequest parked_request;
-    ShardCleanCc clean_pass;
-    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/0);
+    ShardRequest first;
+    ShardRequest second;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/1000);
     CcShard &shard = fixture.Shard();
 
-    // Initialization may already have queued the cleaner when the zero-byte
-    // heap became full. Either way, this call leaves the owned cleaner in-use
-    // and queued without a processor consuming it.
+    // Leaves the owned cleaner in use and queued, with no processor consuming
+    // it, whether or not initialization had queued it already.
     shard.WakeUpShardCleanCc();
     const size_t active_cleaner_queue_size = shard.QueueSize();
     REQUIRE(active_cleaner_queue_size > 0);
 
-    // This second call must record a sticky wake instead of enqueueing another
-    // copy of the cleaner.
+    // Neither a second wake-up nor a park enqueues another copy. Each park is
+    // counted: that count, not the list, is how the cleaner later tells that
+    // a request found the heap at its limit after a release.
     shard.WakeUpShardCleanCc();
+    first.Use();
+    shard.EnqueueWaitListIfMemoryFull(&first);
+    second.Use();
+    shard.EnqueueWaitListIfMemoryFull(&second);
     REQUIRE(shard.QueueSize() == active_cleaner_queue_size);
-
-    parked_request.Use();
-    shard.EnqueueWaitListIfMemoryFull(&parked_request);
-    REQUIRE(shard.WaitListSizeForMemory() == 1);
-
-    // A zero-byte heap is deterministically full. Marking defrag in-flight
-    // keeps the unproductive-pass branch from notifying a checkpointer, which
-    // is intentionally absent from this standalone fixture.
-    shard.GetShardHeap()->SetDefragHeapCcOnFly(true);
-    clean_pass.Use();
-    REQUIRE_FALSE(clean_pass.Execute(shard));
-
-    // Execute consumed the sticky wake and queued another pass rather than
-    // returning true while the ordinary request remained parked.
-    REQUIRE(shard.WaitListSizeForMemory() == 1);
-    REQUIRE(shard.QueueSize() == active_cleaner_queue_size + 1);
-    REQUIRE_FALSE(shard.TakeShardCleanCcWakeUp());
+    REQUIRE(shard.WaitListSizeForMemory() == 2);
+    REQUIRE(shard.MemoryParkCount() == 2);
+    REQUIRE(shard.DequeueWaitListAfterMemoryFree(/*deque_all=*/true));
 }
 
-TEST_CASE("shard cleaner clears a sticky wake after draining parked requests",
-          "[checkpoint-flush][shard-clean][sticky-wake]")
+TEST_CASE(
+    "without cache replacement the cleaner releases below the limit and "
+    "sweeps nothing",
+    "[checkpoint-flush][shard-clean][headroom]")
 {
     ShardRequest parked_request;
     ShardCleanCc clean_pass;
     ShardCleanerFixture fixture(/*node_memory_limit_mb=*/1000);
     CcShard &shard = fixture.Shard();
-
-    shard.WakeUpShardCleanCc();
-    const size_t active_cleaner_queue_size = shard.QueueSize();
-    REQUIRE(active_cleaner_queue_size > 0);
-    shard.WakeUpShardCleanCc();
-    REQUIRE(shard.QueueSize() == active_cleaner_queue_size);
-
+    /** Puts the cache-replacement flag back when the test ends. */
+    struct RestoreCacheReplacement
+    {
+        bool previous = txservice_enable_cache_replacement;  ///< Saved value.
+        ~RestoreCacheReplacement()
+        {
+            txservice_enable_cache_replacement = previous;
+        }
+    } restore;
+    txservice_enable_cache_replacement = false;
+    const size_t queued = shard.QueueSize();
     parked_request.Use();
     shard.EnqueueWaitListIfMemoryFull(&parked_request);
-    clean_pass.Use();
-    REQUIRE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 1);
+    REQUIRE(shard.QueueSize() == queued + 1);
 
-    // Available memory released the parked request. The concurrent wake has
-    // therefore already been served and must not survive into a later pass.
+    // The heap is far below the limit: the pass has nothing to sweep, releases
+    // at once, and its continuation finds nothing to do. The cursor never
+    // moves and no retry is deferred.
+    clean_pass.Use();
+    REQUIRE_FALSE(clean_pass.Execute(shard));
     REQUIRE(shard.WaitListSizeForMemory() == 0);
-    REQUIRE(shard.QueueSize() == active_cleaner_queue_size + 1);
-    REQUIRE_FALSE(shard.TakeShardCleanCcWakeUp());
+    REQUIRE(shard.CleanStart() == nullptr);
+    REQUIRE(clean_pass.Execute(shard));
+    REQUIRE(shard.CleanRetryDeadline() == 0);
 }
+
+#if !defined(WITH_JEMALLOC) && !defined(RUNNING_TXSERVICE_CTEST)
+TEST_CASE("shard cleaner evicts to the target and releases below the limit",
+          "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest parked_request;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    CleanerPages pages(shard, 64);
+    auto ballast = FillCleanerHeap(heap, 1.001);
+    REQUIRE(heap.Full());
+    bool parked = false;
+    SECTION(
+        "a parked request is released as soon as the heap is below the "
+        "limit")
+    {
+        parked_request.Use();
+        shard.EnqueueWaitListIfMemoryFull(&parked_request);
+        parked = true;
+    }
+    SECTION("a full heap starts cleaning without a parked request")
+    {
+    }
+
+    clean_pass.Use();
+    size_t rounds = 0;
+    bool finished = false;
+    do
+    {
+        const size_t cleaned_before = pages.Cleaned();
+        finished = clean_pass.Execute(shard);
+        REQUIRE(pages.Cleaned() - cleaned_before <= 10);
+        int64_t allocated = 0;
+        const bool full = heap.Full(&allocated);
+        if (!finished)
+        {
+            // Eviction continues to the target. The request, if any, is
+            // released on the first execution that finds the heap below the
+            // limit, and nothing parks after that, so it stays released.
+            REQUIRE(allocated >
+                    static_cast<int64_t>(heap.MemoryLimit() * 0.95));
+            if (parked && !full)
+            {
+                REQUIRE(shard.WaitListSizeForMemory() == 0);
+            }
+        }
+        else
+        {
+            REQUIRE(allocated <=
+                    static_cast<int64_t>(heap.MemoryLimit() * 0.95));
+            REQUIRE(shard.WaitListSizeForMemory() == 0);
+        }
+        REQUIRE(++rounds <= 64);
+    } while (!finished);
+    REQUIRE(pages.Cleaned() > 10);
+    REQUIRE(pages.Cleaned() < 64);
+    REQUIRE(shard.CleanRetryDeadline() == 0);
+    REQUIRE(parked_request.AbortError() == CcErrorCode::NO_ERROR);
+}
+
+TEST_CASE("shard cleaner drains more than twenty waiters after a short sweep",
+          "[checkpoint-flush][shard-clean][headroom]")
+{
+    std::vector<std::unique_ptr<ShardRequest>> requests;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    CleanerPages pages(shard, 1);
+    for (size_t i = 0; i < 45; ++i)
+    {
+        requests.push_back(std::make_unique<ShardRequest>(true));
+        requests.back()->Use();
+        shard.EnqueueWaitListIfMemoryFull(requests.back().get());
+    }
+    auto ballast = FillCleanerHeap(heap, 0.97);
+    REQUIRE_FALSE(heap.Full());
+    clean_pass.Use();
+    // The only page goes in the first execution and the sweep is at the tail,
+    // still above the target. Nothing parks after a release, so a batch of 20
+    // goes out per execution until the list is empty.
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(pages.Cleaned() == 1);
+    REQUIRE(shard.WaitListSizeForMemory() == 25);
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 5);
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 0);
+    // Nothing parked and nothing left to evict: the pass ends and the cleaner
+    // goes idle without deferring a retry. One page is under the release
+    // threshold, so the pass would ask for a checkpoint (none exists in this
+    // fixture, hence the defrag flag).
+    heap.SetDefragHeapCcOnFly(true);
+    REQUIRE(clean_pass.Execute(shard));
+    REQUIRE(shard.CleanRetryDeadline() == 0);
+    for (const auto &request : requests)
+    {
+        REQUIRE(request->AbortError() == CcErrorCode::NO_ERROR);
+    }
+}
+
+TEST_CASE(
+    "an unproductive pass releases once, then aborts opt-in requests "
+    "that park again and defers",
+    "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest upload(/*abort_if_oom=*/true);
+    ShardRequest ordinary;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    // No checkpointer exists in this fixture. Simulate one already handling
+    // pressure so the test isolates waiter handling at the end of the pass.
+    heap.SetDefragHeapCcOnFly(true);
+    auto ballast = FillCleanerHeap(heap, 0.99);
+    upload.Use();
+    ordinary.Use();
+    shard.EnqueueWaitListIfMemoryFull(&upload);
+    shard.EnqueueWaitListIfMemoryFull(&ordinary);
+    REQUIRE_FALSE(heap.Full());
+    clean_pass.Use();
+
+    // Nothing is evictable, but the heap is below the limit and nothing has
+    // parked since a release, so both requests get one try.
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 0);
+    REQUIRE(upload.AbortError() == CcErrorCode::NO_ERROR);
+
+    // Both find the heap full again and park. At the tail nothing backs a
+    // second try: the pass ends, the opt-in request is aborted because the
+    // pass freed nothing, the ordinary one stays parked, and the cleaner
+    // defers instead of releasing again.
+    shard.EnqueueWaitListIfMemoryFull(&upload);
+    shard.EnqueueWaitListIfMemoryFull(&ordinary);
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(upload.AbortError() == CcErrorCode::OUT_OF_MEMORY);
+    REQUIRE_FALSE(upload.InUse());
+    REQUIRE(ordinary.AbortError() == CcErrorCode::NO_ERROR);
+    REQUIRE(shard.WaitListSizeForMemory() == 1);
+    REQUIRE(shard.CleanBackoff() == 1);
+    const uint64_t deadline = shard.CleanRetryDeadline();
+    REQUIRE(deadline != 0);
+
+    // The timer thread enqueues the shard's cleaner once the deadline passes,
+    // and only then.
+    const size_t queued = shard.QueueSize();
+    shard.FireCleanRetryIfDue(deadline - 1);
+    REQUIRE(shard.CleanRetryDeadline() == deadline);
+    REQUIRE(shard.QueueSize() == queued);
+    shard.FireCleanRetryIfDue(deadline);
+    REQUIRE(shard.CleanRetryDeadline() == 0);
+    REQUIRE(shard.QueueSize() == queued + 1);
+}
+
+TEST_CASE(
+    "after a request hits the limit, the next release waits for the "
+    "configured reclaim, not for the target",
+    "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest request;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    CleanerPages pages(shard, 64);
+    RestoreReleaseKb restore;
+    // 1 MB: sixteen of the fixture's 64 KB pages, more than one batch of ten
+    // frees, and far less than the 5% target (3.2 MB).
+    FLAGS_shard_clean_release_kb = 1024;
+    // Just over the limit, so that even a single evicted page brings the heap
+    // back below it.
+    auto ballast = FillCleanerHeap(heap, 1.0005);
+    REQUIRE(heap.Full());
+    request.Use();
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    clean_pass.Use();
+
+    // The first batch of pages brings the heap below the limit and the
+    // request is released at once: nothing hit the limit since the pass
+    // started.
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(pages.Cleaned() >= 1);
+    REQUIRE(pages.Cleaned() <= 10);
+    REQUIRE_FALSE(heap.Full());
+    REQUIRE(shard.WaitListSizeForMemory() == 0);
+
+    // It parks again: the room that release handed out is used up. The next
+    // release waits until the pass has reclaimed the threshold, which takes
+    // more than one batch of pages; the heap stays below the target all along.
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    const size_t cleaned_at_park = pages.Cleaned();
+    size_t rounds = 0;
+    while (shard.WaitListSizeForMemory() == 1)
+    {
+        const size_t cleaned_before = pages.Cleaned();
+        REQUIRE_FALSE(clean_pass.Execute(shard));
+        REQUIRE(pages.Cleaned() > cleaned_before);
+        int64_t allocated = 0;
+        heap.Full(&allocated);
+        REQUIRE(heap.NeedMoreCleaning(allocated));
+        const size_t reclaimed_pages = pages.Cleaned() - cleaned_at_park;
+        if (reclaimed_pages <= 12)
+        {
+            // At most 768 KB reclaimed: still held.
+            REQUIRE(shard.WaitListSizeForMemory() == 1);
+        }
+        else if (reclaimed_pages >= 20)
+        {
+            // 1.25 MB or more reclaimed: released.
+            REQUIRE(shard.WaitListSizeForMemory() == 0);
+        }
+        REQUIRE(++rounds <= 8);
+    }
+    REQUIRE(rounds >= 2);
+
+    // Nothing parked any more: the pass evicts on and goes idle without
+    // deferring a retry.
+    rounds = 0;
+    while (!clean_pass.Execute(shard))
+    {
+        REQUIRE(shard.WaitListSizeForMemory() == 0);
+        REQUIRE(++rounds <= 64);
+    }
+    REQUIRE(shard.CleanRetryDeadline() == 0);
+    REQUIRE(request.AbortError() == CcErrorCode::NO_ERROR);
+}
+
+TEST_CASE("at the tail a batch that parks again defers the cleaner",
+          "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest request;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    CleanerPages pages(shard, 1);
+    auto ballast = FillCleanerHeap(heap, 0.97);
+    request.Use();
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    clean_pass.Use();
+
+    // The only page goes, the sweep is at the tail, and the request gets one
+    // try with the room that made.
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(pages.Cleaned() == 1);
+    REQUIRE(shard.WaitListSizeForMemory() == 0);
+
+    // It parks again. Nothing backs another try at the tail, so the pass ends
+    // and the cleaner defers. The pass freed something, so no request is
+    // aborted; one page is under the release threshold, so the pass counts as
+    // not keeping up: it would ask for a checkpoint (none exists in this
+    // fixture, hence the defrag flag) and its retry backs off.
+    heap.SetDefragHeapCcOnFly(true);
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 1);
+    REQUIRE(request.AbortError() == CcErrorCode::NO_ERROR);
+    REQUIRE(shard.CleanRetryDeadline() != 0);
+    REQUIRE(shard.CleanBackoff() == 1);
+}
+
+TEST_CASE(
+    "a zero release threshold means any reclaim and still ends the pass at "
+    "the tail",
+    "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest request;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    CleanerPages pages(shard, 1);
+    RestoreReleaseKb restore;
+    FLAGS_shard_clean_release_kb = 0;
+    // No checkpointer exists in this fixture; see above.
+    heap.SetDefragHeapCcOnFly(true);
+    auto ballast = FillCleanerHeap(heap, 0.97);
+    request.Use();
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    clean_pass.Use();
+
+    // The only page goes and the request gets its try with that room.
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(pages.Cleaned() == 1);
+    REQUIRE(shard.WaitListSizeForMemory() == 0);
+
+    // It parks again at the tail. Zero reclaimed since that release is not
+    // "any amount": nothing is released, the pass ends and the cleaner defers
+    // instead of releasing the same request over and over. The one page it
+    // did reclaim is any amount, so the pass counts as productive.
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 1);
+    REQUIRE(shard.CleanStart() == nullptr);
+    REQUIRE(shard.CleanRetryDeadline() != 0);
+    REQUIRE(shard.CleanBackoff() == 0);
+}
+
+TEST_CASE(
+    "after a limit hit the batch that reaches the tail releases what the pass "
+    "reclaimed even under the threshold, and a park at the tail defers",
+    "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest request;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    // Fourteen 64 KB pages are 896 KB, under the 1 MB threshold set below, so
+    // the only release after the limit hit is the one the tail rule allows.
+    CleanerPages pages(shard, 14);
+    RestoreReleaseKb restore;
+    FLAGS_shard_clean_release_kb = 1024;
+    // Above the target from the start: eviction here is driven by the limit
+    // hit alone.
+    auto ballast = FillCleanerHeap(heap, 0.93);
+    int64_t allocated = 0;
+    REQUIRE_FALSE(heap.Full(&allocated));
+    REQUIRE_FALSE(heap.NeedMoreCleaning(allocated));
+    request.Use();
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    clean_pass.Use();
+
+    // Nothing to evict above the target: the request is released as is.
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(pages.Cleaned() == 0);
+    REQUIRE(shard.WaitListSizeForMemory() == 0);
+
+    // It parks again. Every execution evicts a batch and holds the release,
+    // since these pages cannot reach the threshold, until the batch that
+    // reaches the tail: no later batch could add to the reclaim, so what was
+    // reclaimed goes out instead of waiting for the retry.
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    size_t rounds = 0;
+    do
+    {
+        const size_t cleaned_before = pages.Cleaned();
+        REQUIRE_FALSE(clean_pass.Execute(shard));
+        REQUIRE(pages.Cleaned() > cleaned_before);
+        REQUIRE(shard.WaitListSizeForMemory() == (shard.OutOfMemory() ? 0 : 1));
+        REQUIRE(++rounds <= 14);
+    } while (!shard.OutOfMemory());
+    REQUIRE(pages.Cleaned() == 14);
+
+    // Parked once more at the tail. Nothing was reclaimed since that release,
+    // so nothing is released: the pass ends and the cleaner defers. It freed
+    // memory and the heap is below the limit, so the request is not aborted;
+    // 896 KB is under the 1 MB threshold, so the pass counts as not keeping
+    // up: it would ask for a checkpoint (none exists in this fixture, hence
+    // the defrag flag) and its retry backs off.
+    heap.SetDefragHeapCcOnFly(true);
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 1);
+    REQUIRE(request.AbortError() == CcErrorCode::NO_ERROR);
+    REQUIRE(shard.CleanStart() == nullptr);
+    REQUIRE(shard.CleanRetryDeadline() != 0);
+    REQUIRE(shard.CleanBackoff() == 1);
+}
+
+TEST_CASE("the backoff clears when the cleaner goes idle",
+          "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest request;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    // Pages the sweep visits but cannot evict.
+    CleanerPages pages(shard, 2, /*evictable=*/false);
+    // No checkpointer exists in this fixture; see above.
+    heap.SetDefragHeapCcOnFly(true);
+    auto ballast = FillCleanerHeap(heap, 1.001);
+    REQUIRE(heap.Full());
+    request.Use();
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    clean_pass.Use();
+
+    // Two passes that reclaim nothing: each visits both pages, ends at the
+    // tail with the request still parked, and backs off one step further.
+    for (uint8_t expected_backoff = 1; expected_backoff <= 2;
+         ++expected_backoff)
+    {
+        size_t rounds = 0;
+        do
+        {
+            REQUIRE_FALSE(clean_pass.Execute(shard));
+            REQUIRE(++rounds <= 8);
+        } while (shard.CleanStart() != nullptr);
+        REQUIRE(shard.WaitListSizeForMemory() == 1);
+        REQUIRE(shard.CleanBackoff() == expected_backoff);
+    }
+
+    // Traffic frees memory and the heap drops far below the limit. The next
+    // pass releases the request at once, then finds nothing parked and
+    // nothing to evict and goes idle: the episode is over and the backoff
+    // clears, so the next one starts from the base delay.
+    ballast.clear();
+    REQUIRE_FALSE(heap.Full());
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.WaitListSizeForMemory() == 0);
+    REQUIRE(clean_pass.Execute(shard));
+    REQUIRE(shard.CleanBackoff() == 0);
+    REQUIRE(request.AbortError() == CcErrorCode::NO_ERROR);
+}
+
+TEST_CASE(
+    "a flush during a pass adds one pass, unproductive passes back off, "
+    "and a flush wake resets the backoff",
+    "[checkpoint-flush][shard-clean][headroom]")
+{
+    ShardRequest request;
+    ShardCleanCc clean_pass;
+    ShardCleanerFixture fixture(/*node_memory_limit_mb=*/64);
+    CcShard &shard = fixture.Shard();
+    CcShardHeap &heap = *shard.GetShardHeap();
+    // Pages the sweep visits but cannot evict.
+    CleanerPages pages(shard, 64, /*evictable=*/false);
+    // No checkpointer exists in this fixture; see above.
+    heap.SetDefragHeapCcOnFly(true);
+    auto ballast = FillCleanerHeap(heap, 1.001);
+    REQUIRE(heap.Full());
+    request.Use();
+    shard.EnqueueWaitListIfMemoryFull(&request);
+    clean_pass.Use();
+
+    // Drives the pass to its end, which resets the cursor. The heap stays
+    // full, so the request stays parked throughout.
+    auto run_pass_to_end = [&]()
+    {
+        size_t rounds = 0;
+        do
+        {
+            REQUIRE_FALSE(clean_pass.Execute(shard));
+            REQUIRE(shard.WaitListSizeForMemory() == 1);
+            REQUIRE(++rounds <= 200);
+        } while (shard.CleanStart() != nullptr);
+    };
+
+    // A flush completes mid-pass. The pass is not rewound: it finishes its
+    // sweep, then runs once more from the head instead of deferring.
+    REQUIRE_FALSE(clean_pass.Execute(shard));
+    REQUIRE(shard.CleanStart() != nullptr);
+    REQUIRE_FALSE(shard.OutOfMemory());
+    shard.OnDirtyDataFlushed();
+    run_pass_to_end();
+    REQUIRE(pages.Visited() == 64);
+    REQUIRE(shard.CleanRetryDeadline() == 0);
+    run_pass_to_end();
+    REQUIRE(pages.Visited() == 128);
+
+    // That second pass was unproductive and nothing arrived during it: the
+    // cleaner defers with the first backoff step.
+    REQUIRE(shard.CleanRetryDeadline() != 0);
+    REQUIRE(shard.CleanBackoff() == 1);
+
+    // A flush completion while deferred runs the cleaner now and resets the
+    // backoff.
+    const size_t queued = shard.QueueSize();
+    shard.OnDirtyDataFlushed();
+    REQUIRE(shard.CleanRetryDeadline() == 0);
+    REQUIRE(shard.CleanBackoff() == 0);
+    REQUIRE(shard.QueueSize() == queued + 1);
+
+    // Consecutive unproductive passes double the delay up to the cap.
+    for (uint8_t expected_backoff : {1, 2, 3, 4, 4})
+    {
+        run_pass_to_end();
+        REQUIRE(shard.CleanBackoff() == expected_backoff);
+        const uint64_t deadline = shard.CleanRetryDeadline();
+        REQUIRE(deadline != 0);
+        const uint64_t now_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        const uint64_t delay_us = uint64_t{100'000} << expected_backoff;
+        REQUIRE(deadline > now_us);
+        REQUIRE(deadline - now_us <= delay_us);
+        REQUIRE(deadline - now_us > delay_us / 2);
+        shard.FireCleanRetryIfDue(deadline);
+        REQUIRE(shard.CleanRetryDeadline() == 0);
+    }
+    REQUIRE(request.AbortError() == CcErrorCode::NO_ERROR);
+}
+#endif
 
 TEST_CASE("checkpoint publication honors backend and MVCC durability bounds",
           "[checkpoint-flush][durability]")
@@ -1993,21 +2633,36 @@ TEST_CASE("live shard dispatch covers checkpoint and intrusive wait lists",
     abort_first.Use();
     retained.Use();
     abort_last.Use();
-    shard->EnqueueWaitListIfMemoryFull(&abort_first);
-    shard->EnqueueWaitListIfMemoryFull(&retained);
-    shard->EnqueueWaitListIfMemoryFull(&abort_last);
-    REQUIRE(shard->WaitListSizeForMemory() == 3);
-
-    shard->AbortRequestsAfterMemoryFree();
-    REQUIRE(abort_first.AbortError() == CcErrorCode::OUT_OF_MEMORY);
-    REQUIRE(abort_last.AbortError() == CcErrorCode::OUT_OF_MEMORY);
-    REQUIRE(shard->WaitListSizeForMemory() == 1);
-    REQUIRE(shard->DequeueWaitListAfterMemoryFree(/*deque_all=*/true));
-
     ShardRequest schema_waiter;
     schema_waiter.Use();
-    shard->EnqueueWaitListIfSchemaMismatch(&schema_waiter);
-    shard->DequeueWaitListAfterSchemaUpdated();
+    size_t parked_before_abort = 0;
+    size_t parked_after_abort = 0;
+    bool memory_wait_list_drained = false;
+    // Parking schedules the cleaner. Manipulate the intrusive lists on their
+    // owning shard so it cannot drain them concurrently with this test.
+    WaitableCc manage_waiters(
+        [&](CcShard &owner)
+        {
+            owner.EnqueueWaitListIfMemoryFull(&abort_first);
+            owner.EnqueueWaitListIfMemoryFull(&retained);
+            owner.EnqueueWaitListIfMemoryFull(&abort_last);
+            parked_before_abort = owner.WaitListSizeForMemory();
+            owner.AbortRequestsAfterMemoryFree();
+            parked_after_abort = owner.WaitListSizeForMemory();
+            memory_wait_list_drained =
+                owner.DequeueWaitListAfterMemoryFree(/*deque_all=*/true);
+            owner.EnqueueWaitListIfSchemaMismatch(&schema_waiter);
+            owner.DequeueWaitListAfterSchemaUpdated();
+            return true;
+        });
+    shards->EnqueueToCcShard(0, &manage_waiters);
+    manage_waiters.Wait();
+    REQUIRE_FALSE(manage_waiters.IsError());
+    REQUIRE(parked_before_abort == 3);
+    REQUIRE(abort_first.AbortError() == CcErrorCode::OUT_OF_MEMORY);
+    REQUIRE(abort_last.AbortError() == CcErrorCode::OUT_OF_MEMORY);
+    REQUIRE(parked_after_abort == 1);
+    REQUIRE(memory_wait_list_drained);
 
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (

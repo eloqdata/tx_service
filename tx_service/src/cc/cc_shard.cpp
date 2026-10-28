@@ -568,6 +568,11 @@ void CcShard::Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req)
 void CcShard::EnqueueWaitListIfMemoryFull(CcRequestBase *req)
 {
     cc_wait_list_for_memory_.PushBack(req);
+    // Counted even when cache replacement is off: the cleaner then evicts
+    // nothing, but it still releases parked requests once the heap is below
+    // the limit and defers while it is not.
+    ++memory_park_count_;
+    WakeUpShardCleanCc();
 }
 
 bool CcShard::DequeueWaitListAfterMemoryFree(bool deque_all)
@@ -620,14 +625,56 @@ void CcShard::WakeUpShardCleanCc()
     if (!shard_clean_cc_->InUse())
     {
         shard_clean_cc_->Use();
-        Enqueue(shard_clean_cc_.get());
+        Enqueue(core_id_, shard_clean_cc_.get());
     }
-    else
+}
+
+void CcShard::OnDirtyDataFlushed()
+{
+    if (clean_retry_deadline_.exchange(0, std::memory_order_acq_rel) != 0)
     {
-        // The pass in flight may already have scanned past whatever this
-        // wake-up is about. Remember it so the pass re-runs instead of
-        // stopping with requests still parked.
-        shard_clean_cc_wake_pending_ = true;
+        // Deferred, and the retry is now ours to run. Newly evictable entries
+        // are a reason to start from the base delay again.
+        clean_backoff_ = 0;
+        Enqueue(core_id_, shard_clean_cc_.get());
+    }
+    else if (shard_clean_cc_->InUse())
+    {
+        // Queued or mid-pass -- or deferred with the timer having just claimed
+        // the retry. A pass is coming either way; mark it to run once more so
+        // entries behind its cursor are reached.
+        clean_rescan_requested_ = true;
+    }
+    // Idle: nothing is parked, so there is nothing to resume.
+}
+
+void CcShard::DeferCleanPass(bool productive)
+{
+    clean_backoff_ = productive
+                         ? 0
+                         : std::min(static_cast<uint8_t>(clean_backoff_ + 1),
+                                    kCleanRetryMaxBackoff);
+    const uint64_t now_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    clean_retry_deadline_.store(
+        now_us + (kCleanRetryBaseDelayUs << clean_backoff_),
+        std::memory_order_release);
+}
+
+void CcShard::FireCleanRetryIfDue(uint64_t now_us)
+{
+    uint64_t deadline = clean_retry_deadline_.load(std::memory_order_acquire);
+    if (deadline == 0 || now_us < deadline)
+    {
+        return;
+    }
+    if (clean_retry_deadline_.compare_exchange_strong(
+            deadline, 0, std::memory_order_acq_rel))
+    {
+        // From the timer thread: no producer token of this shard's.
+        Enqueue(shard_clean_cc_.get());
     }
 }
 

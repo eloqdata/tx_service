@@ -933,8 +933,18 @@ public:
         return new_range_entries;
     }
 
+    /**
+     * Frees the shard of core @p idx when its worker thread exits.
+     *
+     * Taken under timer_terminate_mux_: the timer thread holds that mutex
+     * while it walks cc_shards_ on every tick (LocalCcShards::TimerRun) to
+     * fire due eviction retries, so the slot turns null and the shard is
+     * destroyed only between two walks, never under one.
+     * @param idx The core, and shard index, whose worker is exiting.
+     */
     void FreeCcShard(size_t idx)
     {
+        std::scoped_lock<std::mutex> lk(timer_terminate_mux_);
         cc_shards_[idx] = nullptr;
     }
 
@@ -2099,12 +2109,20 @@ private:
     const NodeGroupId ng_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
-    // The background thread that periodically advances the timers of the local
-    // shards to the current wall clock.
+    /**
+     * The background thread that periodically advances the timers of the local
+     * shards to the current wall clock and fires the shards' due eviction
+     * retries (LocalCcShards::TimerRun, one tick per 100 ms).
+     */
     std::thread timer_thd_;
-    bool timer_terminate_;
+    bool timer_terminate_;  ///< Set under timer_terminate_mux_ to stop it.
+    /**
+     * Guards timer_terminate_ and is held by the timer thread while it walks
+     * cc_shards_; FreeCcShard takes it so that a worker exiting at shutdown
+     * never empties a slot under that walk.
+     */
     std::mutex timer_terminate_mux_;
-    std::condition_variable timer_terminate_cv_;
+    std::condition_variable timer_terminate_cv_;  ///< Wakes the thread to stop.
     // std::atomic<bool> timer_terminate_;
 
     // Background thread that initializes table_ranges_heap. After init, it

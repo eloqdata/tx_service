@@ -140,6 +140,34 @@ handler, while WAL replay reconstructs it during recovery. Those durability
 boundaries are described in
 [07-durability-and-recovery.md](07-durability-and-recovery.md).
 
+A request that finds the shard heap at its limit parks on the shard's wait
+list; the park is counted, and the shard's single cleaner is scheduled if it
+is idle. A cleaner that is already sweeping or deferred is left alone. A pass
+starts at the LRU head and evicts in bounded batches while allocated memory is
+above the eviction target (5% of the limit free). It releases parked requests
+in batches of 20 whenever the heap is below the hard limit. Once a request has
+found the heap at its limit since the pass started or last released, which the
+park count reveals whoever parked, the room handed out is used up: the next
+release waits until the pass has reclaimed `shard_clean_release_kb` more (a tx
+service gflag, default 256 KB, zero meaning any amount, also a `[local]` key of
+the data substrate config), so the waiters follow the pace of eviction rather
+than a share of the
+heap. At the tail no further batch can add to that, so whatever the pass
+reclaimed since its last release goes out before the pass ends; an execution
+that starts at the tail reclaims nothing and releases nothing more, so the pass
+ends. A
+pass that reaches the tail with requests still parked aborts only requests
+that explicitly allow OOM failure, and only when the heap is full or the pass
+freed nothing; asks for a checkpoint when it reclaimed less than
+`shard_clean_release_kb`, since eviction is then not keeping up and a flush is
+what frees the dirty pages left; and defers. The timer thread retries a
+deferred cleaner after 100 ms, doubling the delay up to 1.6 s while passes stay
+under that bar; the backoff clears when a pass ends with nothing parked, so
+the next episode of pressure starts from 100 ms again. A checkpoint flush or a
+committed
+range split runs a deferred cleaner at once and marks a running pass to run
+once more; nothing rewinds a pass in progress.
+
 ## Deadlock and orphan-lock coordination
 
 Each shard maintains a registry from transactions to the entry locks and

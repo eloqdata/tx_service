@@ -830,6 +830,18 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
             : config_reader.GetBoolean(
                   "local", "enable_mvcc", FLAGS_enable_mvcc);
 
+    // The shard cleaner's release threshold is a tx service gflag that the
+    // cleaner reads directly; the config file sets it unless the command line
+    // already did.
+    const char *field_release = "shard_clean_release_kb";
+    if (CheckCommandLineFlagIsDefault(field_release) &&
+        config_reader.HasValue("local", field_release))
+    {
+        GFLAGS_NAMESPACE::SetCommandLineOption(
+            field_release,
+            config_reader.Get("local", field_release, "").c_str());
+    }
+
     // Load network configuration
     if (!LoadNetworkConfig(core_config_.bootstrap,
                            config_reader,
