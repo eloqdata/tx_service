@@ -26,10 +26,10 @@
 
 #include "cdc_long_poll.h"
 #include "log.pb.h"
-#include "meter.h"
-#include "metrics.h"
 #include "log_shipping_agent.h"
 #include "log_state.h"
+#include "meter.h"
+#include "metrics.h"
 
 #if defined(LOG_STATE_TYPE_RKDB_CLOUD)
 #include "rocksdb_cloud_config.h"

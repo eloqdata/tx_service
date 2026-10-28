@@ -188,9 +188,8 @@ bool DataSubstrate::Start()
     if (metrics::enable_metrics && metrics::enable_log_service_metrics &&
         instance.log_server_ != nullptr)
     {
-        instance.log_server_->EnableMetrics(
-            instance.metrics_registry_.get(),
-            instance.tx_service_common_labels_);
+        instance.log_server_->EnableMetrics(instance.metrics_registry_.get(),
+                                            instance.tx_service_common_labels_);
     }
 #endif
 

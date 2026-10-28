@@ -217,8 +217,8 @@ TEST_CASE("The size observer sees every change of the parked count",
     CHECK(snapshot().back() == 2);
 
     poll.CompleteAll(Wake::kAdvance);
-    REQUIRE(WaitFor([&]
-                    { return first.runs.load() == 1 && second.runs.load() == 1; }));
+    REQUIRE(WaitFor(
+        [&] { return first.runs.load() == 1 && second.runs.load() == 1; }));
     CHECK(snapshot() == std::vector<size_t>{0, 1, 2, 3, 2, 1, 0});
 
     // A request completed before it is parked never counts.
