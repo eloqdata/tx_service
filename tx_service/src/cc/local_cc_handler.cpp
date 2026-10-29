@@ -720,9 +720,15 @@ txservice::LocalCcHandler::ReadCatalog(const TableName &table_name,
 }
 
 bool txservice::LocalCcHandler::ReleaseCatalogRead(NonBlockingLock *lock,
-                                                   TxNumber tx_number) const
+                                                   TxNumber tx_number,
+                                                   uint64_t commit_ts) const
 {
     CcShard *shard_ = cc_shards_.cc_shards_[thd_id_].get();
+    if (commit_ts != 0)
+    {
+        // Before the release, which may resume a writer blocked on the lock.
+        shard_->UpdateLastReadTs(commit_ts);
+    }
     return lock->ReleaseReadLockFast(shard_, tx_number);
 }
 
@@ -1394,7 +1400,10 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
         // NewTx reads each ccshard's next_tx_ident_, which is set concurrently
         // by log replay thread when native cc node finishes log replay. The two
         // events are synchronized by leader_term_.
-        TEntry &tx = ccs.NewTx(tx_ng_id, log_group_id, term);
+        TEntry &tx = ccs.NewTx(tx_ng_id,
+                               log_group_id,
+                               term,
+                               iso_level == IsolationLevel::Snapshot);
         InitTxResult &init_tx_res = hres.Value();
         init_tx_res.txid_ = tx.GetTxId(ccs.GlobalCoreId(tx_ng_id));
         TxNumber txn = init_tx_res.txid_.TxNumber();

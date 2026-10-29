@@ -57,9 +57,14 @@ leader from making a transaction durable after its authority has ended.
 Data records contain the serialized transaction effects needed by tx-side
 replay. Multi-stage catalog, range-split, cluster-scale, and migration records
 retain the durable operation state needed to resolve work that was interrupted
-between metadata and data publication. The exact protobuf fields are a wire
-contract and remain defined in `log.proto`; architecture depends on their
-semantic categories, not a duplicated field inventory.
+between metadata and data publication. A cluster gate record (the gate that
+pauses schema operations, [06](06-distribution-and-clustering.md)) carries the
+terms of the NGs that granted its lock, so the log service refuses it if one of
+them failed over in between. Every gate transaction writes to log group 0, whose
+one cluster gate slot keeps the newest gate and its version; the slot is never
+purged, because a pause lasts until a resume replaces it. The exact protobuf
+fields are a wire contract and remain defined in `log.proto`; architecture
+depends on their semantic categories, not a duplicated field inventory.
 
 ## Checkpoint and retention
 
@@ -78,13 +83,29 @@ Log-service pressure may request an earlier tx-side checkpoint; it does not
 independently choose a higher safe truncation timestamp. The checkpointer
 remains responsible for proving that store persistence completed.
 
+The change data capture (CDC) retention floor keeps data records in the live
+store for `txlog_cdc_retention_seconds` behind the checkpoint: every backend's
+purge spares a file holding a record at or above `min_ckpt_ts` minus that
+window (`LogState::CdcRetentionFloor`), and the DDL history is trimmed at the
+same floor. The default, 0, leaves retention exactly as above. The cloud
+backend's archive, which nothing reads, is outside the window.
+
 ## Replay and transaction recovery
 
 `ReplayLog` records the candidate CC leader and term, selects the requested
 records from `LogState`, and opens a shipping stream to the tx node's recovery
 service. Separate shipping work per log group allows a node to receive replay
 in parallel. The tx side orders metadata before ordinary data and publishes its
-leader term only after all groups finish.
+leader term only after all groups finish. The replay list carries the cluster
+gate slot after cluster-scale and before schema metadata.
+
+The tx node sends each log group one bounded replay request per attempt
+(`LogAgent::ReplayLogOnce`) and asks again only a group that opened no replay
+stream, since a lost request, a group without a leader and a lost reply look
+the same to it. A request at a term no lower than the NG's current one replaces
+the NG's shipping: the earlier agent stops at its next message, closes its
+stream without the finish message, and the replacing request waits until it
+has stopped.
 
 `RecoverTx` resolves locks left on participant NGs when a coordinator
 disappears. The log service compares the recorded terms and transaction record
@@ -104,12 +125,40 @@ work runs on a dedicated pthread. Captured state remains owned until the worker
 finishes cleanup, before braft completion permits another snapshot or node
 shutdown to finish. Braft retains responsibility for snapshot finalization.
 
+Raft snapshots also carry the cluster gate slot and the DDL history (below).
+
 An application snapshot is publishable only after its complete file set is
 written and registered; local RocksDB metadata and directory entries are synced
 before publication. Failed application attempts leave the previous snapshot
 intact and allow the node to keep serving and retry. They use a non-fatal braft
 status; braft's own storage or publication failures may still disable the
 replica until restart or recreation.
+
+## Change data capture scan
+
+`CdcScan` is a read-only, leader-only RPC for EloqDoc change streams. It
+returns a page of the log group's committed data records and DDL records
+merged by commit timestamp, data first within one timestamp, only those at or
+below the group's arrival-complete timestamp: the lowest checkpoint timestamp
+the CC NGs have reported (`min_ckpt_ts`), which the reply also carries. No
+transaction commits at or below that timestamp later, so no later page holds a
+record below it. A `continuation` resumes both streams exactly after the page's
+last record, and a page is cut near `max_bytes` but is never empty while a
+record remains. A follower answers `NotLeader` with the leader's address, and a
+cloud-backend leader whose database is not yet in sync answers with its own.
+
+The DDL history holds one record per EloqDoc schema operation, positioned at
+its prepare-log timestamp for index operations and at its commit-log timestamp
+otherwise, plus one at the commit-log timestamp for an index build rolled back
+after its prepare log; it lives in the replicated log state and its Raft
+snapshot. An idle
+scan with a wait parks on the leader until the arrival-complete timestamp
+advances, its deadline (capped by `cdc_scan_max_park_ms`), the caller's
+cancellation, or the leader's stop, whichever comes first; past
+`cdc_scan_max_parked` parked requests a scan answers at once (`CdcLongPoll`).
+
+With metrics enabled, every log group exports `cdc_arrival_complete_ts` on each
+replica and `cdc_scan_parked_requests` on the leader, labelled by `lg_id`.
 
 ## Cross-cutting invariants
 
@@ -121,6 +170,10 @@ replica until restart or recreation.
   contract.
 - Log-group leader caches are advisory; clients must refresh and retry after a
   `NotLeader` response.
+- `CdcScan` returns no record above the arrival-complete timestamp, so no
+  record it has not yet returned can appear at or below a timestamp it has
+  passed.
+- The cluster gate slot is never purged; every recovering NG replays it.
 
 ## Source map
 
@@ -133,4 +186,10 @@ replica until restart or recreation.
 | WAL, replay, checkpoint, recovery, and staged-operation wire contracts are defined in protobuf | `tx_service/tx-log-protos/log.proto` |
 | Replay records are selected and shipped back to tx recovery services | `eloq_log_service/include/log_shipping_agent.h`; `eloq_log_service/src/log_instance.cpp`; `tx_service/src/fault/log_replay_service.cpp` |
 | Startup selects in-process or external log-service deployment | `core/src/log_init.cpp`; `build_eloq_log_service.cmake`; `CMakeLists.txt` |
+| `CdcScan` merges data and DDL records up to the arrival-complete timestamp, with continuations | `eloq_log_service/include/cdc_scan.h`; `eloq_log_service/src/cdc_scan.cpp`; `eloq_log_service/src/log_instance.cpp`; `eloq_log_service/include/log_service.h` |
+| Idle scans park until the checkpoint advances, a deadline, cancellation or leader stop | `eloq_log_service/include/cdc_long_poll.h`; `eloq_log_service/src/cdc_long_poll.cpp` |
+| The DDL history, the CDC retention floor and the cluster gate slot live in the log state and its snapshot | `eloq_log_service/include/log_state.h`; `eloq_log_service/src/log_state_rocksdb_impl.cpp`; `eloq_log_service/src/log_state_rocksdb_cloud_impl.cpp` |
+| Per-log-group CDC metrics | `eloq_log_service/include/log_service_metrics.h` |
+| Bounded replay requests and shipping replacement | `tx_service/tx-log-protos/log_agent.cpp`; `eloq_log_service/include/log_shipping_agent.h`; `tx_service/src/fault/log_replay_service.cpp` |
+| CDC scan, long poll, gate slot and schema-op state have focused tests | `eloq_log_service/test/CdcScan-Test.cpp`; `eloq_log_service/test/CdcLongPoll-Test.cpp`; `eloq_log_service/test/LogStateClusterGate-Test.cpp`; `eloq_log_service/test/LogStateSchemaOp-Test.cpp`; `tx_service/tests/LogAgentCdc-Test.cpp` |
 | Replicated writes, replay and snapshot recovery have focused service tests | `eloq_log_service/test/write_log_test.cpp`; `eloq_log_service/test/async_write_log_test.cpp`; `eloq_log_service/test/rocksdb_test.cpp`; `eloq_log_service/test/log_server_rocksdb_cloud_tests.cpp`; `eloq_log_service/test/log_snapshot_test.cpp`; `eloq_log_service/test/log_snapshot_stream_test.cpp` |

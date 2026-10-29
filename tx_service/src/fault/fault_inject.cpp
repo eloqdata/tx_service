@@ -21,6 +21,8 @@
  */
 #include "fault/fault_inject.h"
 
+#include <cstdlib>
+
 #if defined(WITH_LOG_SERVICE) && defined(LOG_STATE_TYPE_RKDB_S3)
 #include "../../../eloq_log_service/include/fault_inject.h"  // txlog::FaultInject from eloq_log_service
 #endif
@@ -248,6 +250,44 @@ void FaultInject::TriggerAction(FaultEntry *entry)
             break;
         }
     }
+}
+
+bool FaultInject::CompiledIn()
+{
+#ifdef WITH_FAULT_INJECT
+    return true;
+#else
+    return false;
+#endif
+}
+
+FaultInject::FaultInject()
+{
+#ifdef WITH_FAULT_INJECT
+    const char *faults = std::getenv("ELOQ_TX_FAULT_INJECT");
+    std::string spec = faults == nullptr ? "" : faults;
+    size_t begin = 0;
+    while (begin < spec.size())
+    {
+        size_t end = spec.find(',', begin);
+        if (end == std::string::npos)
+        {
+            end = spec.size();
+        }
+        std::string item = spec.substr(begin, end - begin);
+        size_t colon = item.find(':');
+        std::string name = item.substr(0, colon);
+        std::string paras =
+            colon == std::string::npos ? "" : item.substr(colon + 1);
+        if (!name.empty())
+        {
+            LOG(INFO) << "FaultInject from ELOQ_TX_FAULT_INJECT, name=" << name
+                      << "  paras=" << paras;
+            injected_fault_map_.try_emplace(name, FaultEntry(name, paras));
+        }
+        begin = end + 1;
+    }
+#endif
 }
 
 void FaultInject::InjectFault(std::string fault_name, std::string paras)

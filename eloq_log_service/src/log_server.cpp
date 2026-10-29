@@ -68,7 +68,8 @@ LogServer::LogServer(uint32_t node_id,
                      uint32_t snapshot_interval,
                      bool enable_request_checkpoint,
                      uint32_t check_replay_log_size_interval_sec,
-                     uint64_t notify_checkpointer_threshold_size)
+                     uint64_t notify_checkpointer_threshold_size,
+                     uint64_t cdc_retention_seconds)
     : port_(port),
       storage_path_(storage_path)
 #if defined(LOG_STATE_TYPE_RKDB_ALL)
@@ -109,7 +110,8 @@ LogServer::LogServer(uint32_t node_id,
                                      snapshot_interval,
                                      enable_request_checkpoint,
                                      check_replay_log_size_interval_sec,
-                                     notify_checkpointer_threshold_size);
+                                     notify_checkpointer_threshold_size,
+                                     cdc_retention_seconds);
 }
 
 int LogServer::Start(bool enable_brpc_builtin_services)

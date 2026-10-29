@@ -1,6 +1,7 @@
 #include "log_state_rocksdb_impl.h"
 
 #if defined(LOG_STATE_TYPE_RKDB)
+#include <bthread/bthread.h>
 #include <fcntl.h>
 #include <rocksdb/db.h>
 #include <rocksdb/sst_file_reader.h>
@@ -122,6 +123,9 @@ LogStateRocksDBImpl::GetLogReplayList(uint32_t ng_id, uint64_t start_timestamp)
     size_t rs_size = ddl_list.size() - scale_size - schema_size;
     LOG(INFO) << "split_range_op_list size: " << rs_size;
 
+    // After the cluster scale list, which asserts it holds at most one item.
+    GetClusterGateList(ddl_list);
+
     std::unique_ptr<ItemIterator> result =
         std::make_unique<ItemIteratorRocksDBImpl>(rocksdb_scan_threads_,
                                                   std::move(ddl_list),
@@ -200,6 +204,46 @@ std::pair<bool, Item::Pointer> LogStateRocksDBImpl::SearchTxDataLog(
     return std::make_pair(true, ptr);
 }
 
+CdcScanStatus LogStateRocksDBImpl::CdcScan(const CdcScanRequest &request,
+                                           CdcScanResponse *response,
+                                           std::string *error)
+{
+    // The bound first, then the view of the store (RunCdcScan).
+    const uint64_t arrival_complete_ts = MinCkptTs();
+
+    // Register before checking whether scans are allowed. StopCdcScans()
+    // clears the flag before it reads the count, and all four accesses are
+    // sequentially consistent, so either this scan sees the flag cleared or
+    // StopCdcScans() sees this scan and waits for it: db_ is never closed
+    // under a scan.
+    cdc_scans_in_flight_.fetch_add(1, std::memory_order_seq_cst);
+    struct Deregister
+    {
+        std::atomic<uint32_t> &in_flight;
+        ~Deregister()
+        {
+            in_flight.fetch_sub(1, std::memory_order_seq_cst);
+        }
+    } deregister{cdc_scans_in_flight_};
+    if (!cdc_scans_allowed_.load(std::memory_order_seq_cst))
+    {
+        *error = "the log state is being closed or reopened";
+        return CdcScanStatus::NotReady;
+    }
+    CdcDdlHistoryCursor ddl = CdcDdlStream();
+    return CdcScanRocksDB(
+        db_, ddl, arrival_complete_ts, request, response, error);
+}
+
+void LogStateRocksDBImpl::StopCdcScans()
+{
+    cdc_scans_allowed_.store(false, std::memory_order_seq_cst);
+    while (cdc_scans_in_flight_.load(std::memory_order_seq_cst) != 0)
+    {
+        bthread_usleep(100);
+    }
+}
+
 void LogStateRocksDBImpl::BeginSnapshot()
 {
     LogState::MakeCopyOfNgInfoAndCatalogOps();
@@ -225,6 +269,27 @@ int LogStateRocksDBImpl::ReadSnapshot(const std::string &snapshot_path,
         {
             std::ifstream is(path.c_str());
             LoadNgInfoAndCatalogOpsFrom(is);
+            continue;
+        }
+        if (file == kCdcDdlHistoryFile)
+        {
+            // A snapshot taken before the history existed has no such file,
+            // and the history stays empty.
+            std::ifstream is(path.c_str(), std::ios::binary);
+            if (!LoadCdcDdlHistoryFrom(is))
+            {
+                return -1;
+            }
+            continue;
+        }
+        if (file == kClusterGateFile)
+        {
+            // Likewise for the cluster gate slot, which stays empty.
+            std::ifstream is(path.c_str(), std::ios::binary);
+            if (!LoadClusterGateFrom(is))
+            {
+                return -1;
+            }
             continue;
         }
 
@@ -279,6 +344,32 @@ std::vector<std::string> LogStateRocksDBImpl::WriteSnapshot(
             return {};
         }
         res.emplace_back("data");
+    }
+    {
+        // Checked and synced like 'data': a snapshot published with a
+        // truncated history would lose DDL records on the follower.
+        auto path = snapshot_path + "/" + kCdcDdlHistoryFile;
+        std::ofstream os(path.c_str(), std::ios::binary);
+        WriteSnapshotCdcDdlHistoryTo(os);
+        os.close();
+        if (!os || !SyncSnapshotPath(path))
+        {
+            LOG(ERROR) << "Failed to write snapshot CDC DDL history: " << path;
+            return {};
+        }
+        res.emplace_back(kCdcDdlHistoryFile);
+    }
+    {
+        auto path = snapshot_path + "/" + kClusterGateFile;
+        std::ofstream os(path.c_str(), std::ios::binary);
+        WriteSnapshotClusterGateTo(os);
+        os.close();
+        if (!os || !SyncSnapshotPath(path))
+        {
+            LOG(ERROR) << "Failed to write snapshot cluster gate: " << path;
+            return {};
+        }
+        res.emplace_back(kClusterGateFile);
     }
 
     // do rocksdb checkpoint, add checkpoint files to snapshot
@@ -416,6 +507,8 @@ int LogStateRocksDBImpl::Start()
         LOG(ERROR) << status.ToString();
         return -1;
     }
+    // db_ is open; CDC scans may read it (StopCdcScans).
+    cdc_scans_allowed_.store(true, std::memory_order_seq_cst);
     write_option_.disableWAL = true;
     LOG(INFO) << "local rocksdb started";
     stop_purge_thread_.store(false, std::memory_order_release);
@@ -437,6 +530,7 @@ void LogStateRocksDBImpl::StopRocksDB()
         purge_thread_.join();
     }
 
+    StopCdcScans();
     if (db_ != nullptr)
     {
         db_->Close();
@@ -476,6 +570,12 @@ void LogStateRocksDBImpl::CloseAndClearRocksDB()
     {
         purge_thread_.join();
     }
+
+    // A CDC scan that began while this node led may still be reading db_,
+    // even though on_snapshot_load runs only on a follower: the node may have
+    // stepped down since. Wait for such scans before closing; none can start
+    // until Start() reopens db_.
+    StopCdcScans();
 
     // first close db_
     if (db_ != nullptr)
@@ -619,8 +719,16 @@ void LogStateRocksDBImpl::PurgingSstFiles()
 
             // prepare the range to delete
             // all log entries before the min_last_ckpt_ts belongs to all cc
-            // node group could be deleted
-            min_last_ckpt_ts -= 1;
+            // node group could be deleted, except those CDC consumers may
+            // still need: nothing at or above the retention floor goes.
+            min_last_ckpt_ts = std::min(min_last_ckpt_ts - 1,
+                                        CdcRetentionFloor(min_last_ckpt_ts));
+            if (min_last_ckpt_ts == 0)
+            {
+                continue;
+            }
+            // The CDC DDL history goes with the data, by the same floor.
+            TrimCdcDdlHistory(min_last_ckpt_ts);
             std::array<char, 20> start_key{};
             std::array<char, 20> end_key{};
             Serialize(start_key, 0, 0, 0);

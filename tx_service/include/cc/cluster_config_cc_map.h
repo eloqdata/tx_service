@@ -28,6 +28,7 @@
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_service.h"
+#include "tx_service_metrics.h"
 
 namespace txservice
 {
@@ -141,11 +142,14 @@ public:
             // Updates last_vali_ts such that it is no smaller than (1) all
             // read transactions that have read the item in all shards, and
             // (2) the local time.
-            acquire_all_result.last_vali_ts_ = shard_->LastReadTs();
-            uint64_t lock_addr =
-                cce_ptr == nullptr ? 0
-                                   : reinterpret_cast<uint64_t>(
-                                         cce_ptr->GetKeyGapLockAndExtraData());
+            acquire_all_result.last_vali_ts_ =
+                std::max(shard_->LastReadTs(), shard_->Now());
+            // The entry's lock address, also on a first execution (cce_ptr is
+            // set only on resume): AcquireAllOp drops a read of the entry the
+            // tx made before from its read set by this address, and an address
+            // of 0 matches no read.
+            uint64_t lock_addr = reinterpret_cast<uint64_t>(
+                cc_entry.GetKeyGapLockAndExtraData());
             acquire_all_result.local_cce_addr_.SetCceLock(
                 lock_addr, ng_term, req.NodeGroupId(), shard_->LocalCoreId());
             acquire_all_result.commit_ts_ = cc_entry.CommitTs();
@@ -238,8 +242,16 @@ public:
             req.SetDecodedPayload(std::move(decoded_rec));
             ACTION_FAULT_INJECTOR("cluster_config_PostWriteAll_remote");
         }
+        // A cluster gate's post write all (EloqDoc docs/cdc-change-stream.md
+        // §6.2) carries no node group configs and changes no topology, so it
+        // skips Sharder: its commit timestamp, raised above the acquire-all
+        // results, is always above the topology version, and the update below
+        // would read the configs it does not carry.
+        const bool gate_only = config_rec->GetClusterGate().has_value();
+
         // First we need to update cluster configs in Sharder.
-        if (Sharder::Instance().ClusterConfigVersion() < req.CommitTs())
+        if (!gate_only &&
+            Sharder::Instance().ClusterConfigVersion() < req.CommitTs())
         {
             // async call to host manager to update ng is made. cc req will be
             // put back in queue once it's done.
@@ -251,8 +263,8 @@ public:
             return false;
         }
 
-        // Lastly release/downgrade lock. We do not need to update the record in
-        // cluster config cc map since it is always empty.
+        // Lastly release/downgrade lock. The record in cluster config cc map
+        // stays empty but for the cluster gate, stored below.
         LockType lk_type = LockType::NoLock;
         TxNumber txn = req.Txn();
         if (lock != nullptr)
@@ -272,10 +284,20 @@ public:
 
         if (lk_type != LockType::NoLock)
         {
-            bool was_dirty = neg_inf_.IsDirty();
+            if (gate_only)
+            {
+                // Only while the request's tx owns the lock: a post write all
+                // retried after its tx completed elsewhere must not overwrite
+                // the value a newer gate op installed since, such as an old
+                // resume arriving after a newer pause. Updated in place, not
+                // replaced: cluster scale's replay caches node group configs
+                // in this payload for an asynchronous Sharder update.
+                neg_inf_.payload_.cur_payload_->SetClusterGate(
+                    *config_rec->GetClusterGate());
+                ReportClusterGate(config_rec->GetClusterGate()->paused);
+            }
             neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
                                               RecordStatus::Normal);
-            OnCommittedUpdate(&neg_inf_, was_dirty);
             ReleaseCceLock(lock, &neg_inf_, txn, req.NodeGroupId());
         }
 
@@ -295,6 +317,10 @@ public:
             // No longer candidate leader, stop immediately
             req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
+        }
+        if (req.IsClusterGate())
+        {
+            return ReplayClusterGate(req);
         }
         shard_->SetBucketMigrating(true);
         const std::string_view &content = req.LogContentView();
@@ -528,12 +554,108 @@ public:
                 cluster_scale_txn, tx_candidate_term, req.CommitTs());
             txm->RecoverClusterScale(scale_op_msg, dm_started, dm_finished);
         }
+        neg_inf_.SetCommitTsPayloadStatus(
+            Sharder::Instance().ClusterConfigVersion(), RecordStatus::Normal);
+
+        req.SetFinish();
+        return true;
+    }
+
+private:
+    /**
+     * @brief Exports cluster_gate_paused for this map's node group: the value
+     * the map now holds. The node's leader stop resets it to 0, since the map
+     * is dropped then.
+     *
+     * @param paused Whether the gate the map holds is paused.
+     */
+    void ReportClusterGate(bool paused) const
+    {
+        if (!metrics::enable_metrics)
         {
-            bool was_dirty = neg_inf_.IsDirty();
-            neg_inf_.SetCommitTsPayloadStatus(
-                Sharder::Instance().ClusterConfigVersion(),
-                RecordStatus::Normal);
-            OnCommittedUpdate(&neg_inf_, was_dirty);
+            return;
+        }
+        metrics::Meter *meter = shard_->local_shards_.GetNodeMeter();
+        if (meter != nullptr)
+        {
+            meter->Collect(metrics::NAME_CLUSTER_GATE_PAUSED,
+                           paused ? 1.0 : 0.0,
+                           std::to_string(cc_ng_id_));
+        }
+    }
+
+    /**
+     * @brief Replays log group 0's cluster gate slot (EloqDoc
+     * docs/cdc-change-stream.md §6.2): installs the slot's value, however old
+     * it is, so that a recovered node group enforces the same gate as the
+     * others.
+     *
+     * The slot holds the latest gate ever logged, and nothing installs a value
+     * it has not logged first, so the slot is never older than what the map
+     * holds. The value is set in place, as the gate's post write sets it:
+     * cluster scale's replay, which ran before this one, cached node group
+     * configs in the same payload for an asynchronous Sharder update. The
+     * entry's commit timestamp only grows: scale's replay may have left it at
+     * a config version above the gate's.
+     *
+     * On the node group that coordinated the gate tx, a recovery tx then
+     * re-sends the install to every node group, under the same tx, to release
+     * the cluster config write lock wherever the tx still holds it (orphan
+     * lock recovery leaves a logged gate tx's lock for this). It takes no lock
+     * or intent: nothing in a gate op follows its log but the install, which
+     * stores and releases only where the tx holds the lock and does nothing
+     * elsewhere. That install reaches this node group too, where the tx holds
+     * no lock after the failover, so the post write all's no-lock branch
+     * finishes without storing anything: this is why the replay installs the
+     * value here itself first. Holding the lock here would also block the
+     * schema op recovery that replays next, whose recovery tx reads the
+     * cluster config, while the install waits for this node group to lead.
+     *
+     * @param req The replay request; its blob is a ClusterGateLogMessage.
+     * @return true, the request is finished.
+     */
+    bool ReplayClusterGate(ReplayLogCc &req)
+    {
+        const std::string_view &content = req.LogContentView();
+        ::txlog::ClusterGateLogMessage gate_msg;
+        if (!gate_msg.ParseFromArray(content.data(), content.length()))
+        {
+            LOG(ERROR) << "Cluster gate replay: corrupt slot, txn: "
+                       << req.Txn();
+            req.AbortCcRequest(CcErrorCode::UNDEFINED_ERR);
+            return false;
+        }
+        ClusterGate gate;
+        gate.mode = gate_msg.mode() ==
+                            ::txlog::ClusterGateLogMessage_GateMode_GateDdlDml
+                        ? ClusterGate::Mode::kDdlDml
+                        : ClusterGate::Mode::kDdl;
+        gate.paused = gate_msg.paused();
+        neg_inf_.payload_.cur_payload_->SetClusterGate(gate);
+        ReportClusterGate(gate.paused);
+        if (req.CommitTs() > neg_inf_.CommitTs())
+        {
+            neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
+                                              RecordStatus::Normal);
+        }
+        LOG(INFO) << "Cluster gate replay: installed "
+                  << (gate.paused ? "paused" : "open") << " at "
+                  << req.CommitTs() << ", txn: " << req.Txn();
+
+        const TxNumber gate_txn = req.Txn();
+        if (((gate_txn >> 32L) >> 10) == req.NodeGroupId())
+        {
+            LOG(INFO) << "Recovering cluster gate tx, txn: " << gate_txn
+                      << ", term: "
+                      << Sharder::Instance().CandidateLeaderTerm(
+                             req.NodeGroupId());
+            TxService *tx_service = shard_->local_shards_.GetTxService();
+            TransactionExecution *txm = tx_service->NewTx();
+            txm->SetRecoverTxState(
+                gate_txn,
+                Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId()),
+                req.CommitTs());
+            txm->RecoverClusterGate(gate_msg);
         }
 
         req.SetFinish();

@@ -281,6 +281,8 @@ ADD_LIBRARY(logservice
     ${LOG_SOURCE_DIR}/src/log_state_rocksdb_impl.cpp
     ${LOG_SOURCE_DIR}/src/log_state_rocksdb_cloud_impl.cpp
     ${LOG_SOURCE_DIR}/src/log_state_memory_impl.cpp
+    ${LOG_SOURCE_DIR}/src/cdc_long_poll.cpp
+    ${LOG_SOURCE_DIR}/src/cdc_scan.cpp
     ${LOG_SOURCE_DIR}/src/fault_inject.cpp
     ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/INIReader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/ini.c
@@ -288,6 +290,9 @@ ADD_LIBRARY(logservice
     )
 
 target_include_directories(logservice PUBLIC ${LOG_INCLUDE_DIR})
+# The log groups' metrics use eloq_metrics' header-only Meter against the
+# registry the process passes in, so the library itself is not linked.
+target_include_directories(logservice PUBLIC ${ELOQ_METRICS_INCLUDE_DIR})
 if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
     target_include_directories(logservice PUBLIC ${ROCKSDB_INCLUDE_PATH})
 endif()

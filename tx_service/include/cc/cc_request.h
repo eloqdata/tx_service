@@ -3065,9 +3065,9 @@ public:
 
     /**
      * @brief The write-lock-holding tx that determined the node group's
-     * checkpoint timestamp, i.e. the tx with the minimum first-write-lock ts
-     * across all shards. txn_ == 0 when no such tx exists (the checkpoint ts
-     * came from the clock).
+     * checkpoint timestamp, i.e. the tx with the minimum wlock_ts (latest
+     * write-lock time) across all shards. txn_ == 0 when no such tx exists (the
+     * checkpoint ts came from the clock).
      */
     PinningTxInfo GetPinningTx() const
     {
@@ -3186,9 +3186,12 @@ private:
     std::vector<uint64_t> standby_msg_seq_id_vec_;
     std::vector<uint32_t> subscribed_node_ids_;
     std::vector<int8_t> heap_full_vec_;
-    // Per-shard tx (and its first-write-lock ts) that produced the shard's
-    // minimum in ActiveTxMinTs. 0 / UINT64_MAX when the shard has no
-    // write-lock-holding tx. Only filled on the leader path.
+    /**
+     * @brief Per-shard tx (and, in pinning_wlock_ts_vec_, its latest
+     * write-lock ts) that produced the shard's minimum in ActiveTxMinTs.
+     * 0 / UINT64_MAX when no tx in the shard holds the checkpoint back. Only
+     * filled on the leader path.
+     */
     std::vector<TxNumber> pinning_txn_vec_;
     std::vector<uint64_t> pinning_wlock_ts_vec_;
     NodeGroupId cc_ng_id_;
@@ -4719,6 +4722,7 @@ public:
         range_splitting_ = range_splitting;
         local_on_fly_cnt_ = nullptr;
         is_lock_recovery_ = is_lock_recovery;
+        is_cluster_gate_ = false;
         upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
         parse_cc_ = parse_cc;
         split_ranges_ = nullptr;
@@ -4917,6 +4921,14 @@ public:
         return range_split_started_;
     }
 
+    /**
+     * @brief Whether a split of the table that the recovering node group
+     * coordinates is in flight: it holds the table's catalog read lock on this
+     * node group, so no schema op holds the table's write lock here.
+     *
+     * @param table_name The base table.
+     * @return true if such a split is in flight.
+     */
     bool RangeSplitting(const TableName &table_name) const
     {
         return range_splitting_ &&
@@ -4967,6 +4979,27 @@ public:
         return is_lock_recovery_;
     }
 
+    /**
+     * @brief Marks the request as the replay of a cluster gate slot, whose
+     * blob is a ClusterGateLogMessage, rather than of a cluster scale log.
+     *
+     * Call after Reset(), which clears the mark.
+     */
+    void SetClusterGate()
+    {
+        is_cluster_gate_ = true;
+    }
+
+    /**
+     * @brief Whether the request replays a cluster gate slot.
+     *
+     * @return true for a cluster gate slot, false for any other log.
+     */
+    bool IsClusterGate() const
+    {
+        return is_cluster_gate_;
+    }
+
     std::pair<bool, CcErrorCode> &UpsertKvErrCode()
     {
         return upsert_kv_err_code_;
@@ -4992,6 +5025,7 @@ private:
     std::atomic_uint32_t *local_on_fly_cnt_{nullptr};
     bool *recovery_error_;
     bool is_lock_recovery_;
+    bool is_cluster_gate_{false};  ///< See SetClusterGate().
     uint16_t first_core_;
     uint16_t next_core_{UINT16_MAX};
     const struct TableSchema *table_schema_{nullptr};
@@ -6443,9 +6477,16 @@ private:
     // Target buckets to be cleaned if clean type is CleanBucketData.
     std::vector<uint16_t> *bucket_ids_{nullptr};
 
-    // 1. CleanForAlterTable: kickout all cce with commit ts <= clean_ts_
-    // 2. CleanForTruncateTable: the commit ts of UpsertTableOp. We truncate ccm
-    // only if catalog_entry->DirtyVersion() == clean_ts_.
+    /**
+     * @brief The timestamp that bounds a clean.
+     *
+     * CleanForAlterTable: kicks out every cc entry committed at or below it.
+     * CleanCcm (DROP and TRUNCATE TABLE, DROP INDEX): the schema op's commit
+     * ts, which for a table op is its commit-stage timestamp P, not the dirty
+     * schema's version D. A node group whose catalog entry's schema version is
+     * at or above it, or a cc map whose schema ts is, treats the request as
+     * outdated and skips it.
+     */
     uint64_t clean_ts_{0};
     // Only used by migration
     int32_t range_id_{INT32_MAX};

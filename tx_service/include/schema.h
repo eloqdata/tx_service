@@ -434,7 +434,9 @@ struct TableKeySchemaTs
      *
      * @param table_name key schema name.
      *
-     * @return If the key is newly added, return 1. Otherwise, return normal ts.
+     * @return The key's recorded ts, or 0, the unknown timestamp, if the image
+     * records none: a key its DDL creates, which takes the version the schema
+     * is built at (CatalogFactory::CreateTableSchema).
      */
     uint64_t GetKeySchemaTs(const txservice::TableName &table_name) const
     {
@@ -445,12 +447,12 @@ struct TableKeySchemaTs
         else
         {
             auto v_it = sk_schemas_ts_.find(table_name);
-            return v_it == sk_schemas_ts_.end() ? 1 : v_it->second;
+            return v_it == sk_schemas_ts_.end() ? 0 : v_it->second;
         }
     }
 
     TableEngine table_engine_{TableEngine::None};
-    uint64_t pk_schema_ts_{1};
+    uint64_t pk_schema_ts_{0};  ///< The base table's ts; 0 if unknown.
     std::unordered_map<txservice::TableName, uint64_t> sk_schemas_ts_;
 };
 

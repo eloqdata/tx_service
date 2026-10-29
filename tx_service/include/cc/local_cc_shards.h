@@ -83,6 +83,7 @@ class RemoteCcHandler;
 class Checkpointer;
 class TxService;
 struct ClusterScaleOp;
+struct ClusterGateOp;
 struct DataMigrationOp;
 struct InvalidateTableCacheCompositeOp;
 class SkGenerator;
@@ -645,6 +646,16 @@ public:
         const std::string &catalog_image,
         uint64_t commit_ts);
 
+    /**
+     * @brief Builds a table's schema object from its catalog image, through
+     * the table engine's CatalogFactory::CreateTableSchema, which documents
+     * how @p version applies to the tables the image records no version for.
+     *
+     * @param table_name The base table.
+     * @param catalog_image The table's catalog image.
+     * @param version The schema's version.
+     * @return The schema; null for an empty image.
+     */
     TableSchema::uptr CreateTableSchemaFromImage(
         const TableName &table_name,
         const std::string &catalog_image,
@@ -922,8 +933,18 @@ public:
         return new_range_entries;
     }
 
+    /**
+     * Frees the shard of core @p idx when its worker thread exits.
+     *
+     * Taken under timer_terminate_mux_: the timer thread holds that mutex
+     * while it walks cc_shards_ on every tick (LocalCcShards::TimerRun) to
+     * fire due eviction retries, so the slot turns null and the shard is
+     * destroyed only between two walks, never under one.
+     * @param idx The core, and shard index, whose worker is exiting.
+     */
     void FreeCcShard(size_t idx)
     {
+        std::scoped_lock<std::mutex> lk(timer_terminate_mux_);
         cc_shards_[idx] = nullptr;
     }
 
@@ -1922,7 +1943,7 @@ public:
     response CcMessage should always be valid(memory not being freed). This is
     important in the case where network timeout happens and remote response(sent
     by retry) arrives after UpsertTableOp has finished(finished means txm has
-    been reset and schema_op_ unique pointer in txm has been set to null).
+    been reset and its composite op slot has been cleared).
 
     To avoid this pointer invalidation, the UpsertTableOp is moved from txm to
     local_cc_shards once finished the last step of the schema op to maintain
@@ -1932,26 +1953,33 @@ public:
 
     */
     std::vector<std::unique_ptr<UpsertTableOp>> table_schema_op_pool_;
-    std::mutex table_schema_op_pool_mux_;
     std::vector<std::unique_ptr<SplitFlushRangeOp>> split_flush_range_op_pool_;
-    std::mutex split_flush_range_op_pool_mux_;
     std::vector<std::unique_ptr<UpsertTableIndexOp>> table_index_op_pool_;
     std::vector<std::unique_ptr<SkGenerator>> sk_generator_pool_;
-    std::mutex table_index_op_pool_mux_;
 
     // Since there's only 1 cluster scale event at a time across the cluster,
     // we don't need a pool for it. We just need to make sure that the op is not
     // invalidated in case late remote cc response comes in.
 
     std::vector<std::unique_ptr<ClusterScaleOp>> cluster_scale_op_pool_;
-    std::mutex cluster_scale_op_mux_;
+
+    /**
+     * @brief Finished cluster gate ops. An op outlives its request because a
+     * remote response that comes in after the op finished still reads the cc
+     * handler result of one of its stages, which the op owns.
+     */
+    std::vector<std::unique_ptr<ClusterGateOp>> cluster_gate_op_pool_;
 
     std::vector<std::unique_ptr<InvalidateTableCacheCompositeOp>>
         invalidate_table_cache_op_pool_;
-    std::mutex invalidate_table_cache_op_mux_;
 
-    std::mutex data_migration_op_pool_mux_;
     std::vector<std::unique_ptr<DataMigrationOp>> migration_op_pool_;
+
+    /**
+     * @brief Guards every op pool above and sk_generator_pool_. Each user holds
+     * it only to take or return one object, never while taking another lock.
+     */
+    std::mutex op_pool_mux_;
 
     // protects the table ranges heap to avoid concurrent memory requests by
     // multiple threads.
@@ -2081,12 +2109,20 @@ private:
     const NodeGroupId ng_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
-    // The background thread that periodically advances the timers of the local
-    // shards to the current wall clock.
+    /**
+     * The background thread that periodically advances the timers of the local
+     * shards to the current wall clock and fires the shards' due eviction
+     * retries (LocalCcShards::TimerRun, one tick per 100 ms).
+     */
     std::thread timer_thd_;
-    bool timer_terminate_;
+    bool timer_terminate_;  ///< Set under timer_terminate_mux_ to stop it.
+    /**
+     * Guards timer_terminate_ and is held by the timer thread while it walks
+     * cc_shards_; FreeCcShard takes it so that a worker exiting at shutdown
+     * never empties a slot under that walk.
+     */
     std::mutex timer_terminate_mux_;
-    std::condition_variable timer_terminate_cv_;
+    std::condition_variable timer_terminate_cv_;  ///< Wakes the thread to stop.
     // std::atomic<bool> timer_terminate_;
 
     // Background thread that initializes table_ranges_heap. After init, it

@@ -60,6 +60,23 @@ public:
             log_group_id, cntl, &request, &response, &done);
     }
 
+    void CdcScan(uint32_t log_group_id,
+                 brpc::Controller *cntl,
+                 const ::txlog::CdcScanRequest &request,
+                 ::txlog::CdcScanResponse &response,
+                 std::optional<uint32_t> *node_id,
+                 google::protobuf::Closure &done) override
+    {
+        log_agent_.CdcScan(
+            log_group_id, cntl, &request, &response, node_id, &done);
+    }
+
+    std::optional<uint32_t> LogNodeByAddress(
+        uint32_t log_group_id, const std::string &address) override
+    {
+        return log_agent_.LogNodeByAddress(log_group_id, address);
+    }
+
     ::txlog::CheckClusterScaleStatusResponse::Status CheckClusterScaleStatus(
         uint32_t log_group_id, const std::string &id) override
     {
@@ -79,21 +96,19 @@ public:
         log_agent_.RemoveCcNodeGroup(cc_node_group_id, term);
     }
 
-    void ReplayLog(uint32_t cc_node_group_id,
+    bool ReplayLog(uint32_t cc_node_group_id,
                    int64_t term,
                    const std::string &source_ip,
                    uint16_t source_port,
-                   int log_group,
-                   uint64_t start_ts,
-                   std::atomic<bool> &interrupt) override
+                   uint32_t log_group_id,
+                   uint64_t start_ts) override
     {
-        log_agent_.ReplayLog(cc_node_group_id,
-                             term,
-                             source_ip,
-                             source_port,
-                             log_group,
-                             start_ts,
-                             interrupt);
+        return log_agent_.ReplayLogOnce(cc_node_group_id,
+                                        term,
+                                        source_ip,
+                                        source_port,
+                                        log_group_id,
+                                        start_ts);
     }
 
     txservice::RecoverTxStatus RecoverTx(uint64_t tx_number,

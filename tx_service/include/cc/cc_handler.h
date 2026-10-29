@@ -130,6 +130,26 @@ public:
                                  CcOperation cc_op,
                                  bool abort_if_oom) = 0;
 
+    /**
+     * @brief Post-processes a write key on every core of a node group, as
+     * @p post_write_type says: for example, PrepareCommit installs a dirty
+     * record, PostCommit commits it and releases the write lock or intent that
+     * AcquireWriteAll() took.
+     *
+     * @param table_name Name of the table the key belongs to
+     * @param key The written key
+     * @param rec The record to install
+     * @param ng_id The node group the key belongs to
+     * @param tx_number The tx that holds the write lock or intent
+     * @param tx_term The term of the tx's node group
+     * @param command_id The tx's command id
+     * @param ts The commit timestamp; 0 only for a Rollback, which then moves
+     * no commit timestamp, or a DowngradeLock
+     * @param hres Result handler of the request
+     * @param op_type The type of the write
+     * @param post_write_type The kind of post-processing
+     * @param abort_if_oom Whether or not to abort the request if out of memory
+     */
     virtual void PostWriteAll(const TableName &table_name,
                               const TxKey &key,
                               TxRecord &rec,

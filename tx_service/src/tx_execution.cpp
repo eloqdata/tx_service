@@ -148,10 +148,7 @@ void TransactionExecution::Reset()
     bool_resp_ = nullptr;
     kvp_resp_ = nullptr;
     uint64_resp_ = nullptr;
-    schema_op_ = nullptr;
-    split_flush_op_ = nullptr;
-    index_op_ = nullptr;
-    invalidate_table_cache_composite_op_ = nullptr;
+    composite_op_ = std::monostate{};
 
     scan_alias_cnt_ = 0;
 
@@ -315,13 +312,16 @@ void TransactionExecution::ReleaseCatalogsRead()
     }
 
     uint64_t tx_number = TxNumber();
+    // The commit ts, if the tx got one: 0 from its start until then, and
+    // UINT64_MAX before its first start.
+    const uint64_t commit_ts = commit_ts_ == UINT64_MAX ? 0 : commit_ts_;
     for (auto &db_idx : locked_db_)
     {
         if (db_idx.first != nullptr)
         {
             LocalCcHandler *local_hd =
                 static_cast<LocalCcHandler *>(cc_handler_);
-            local_hd->ReleaseCatalogRead(db_idx.first, tx_number);
+            local_hd->ReleaseCatalogRead(db_idx.first, tx_number, commit_ts);
         }
     }
     locked_db_ = {};
@@ -975,8 +975,7 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
         req.op_type_ == OperationType::DropTable ||
         req.op_type_ == OperationType::TruncateTable)
     {
-        std::unique_lock<std::mutex> lk(
-            local_shards->table_schema_op_pool_mux_);
+        std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
         if (local_shards->table_schema_op_pool_.empty())
         {
             std::unique_ptr<UpsertTableOp> table_op = nullptr;
@@ -988,30 +987,32 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                                                 *req.dirty_image_,
                                                 req.op_type_,
                                                 this);
-            schema_op_ = std::move(table_op);
+            CompositeOpSlot<UpsertTableOp>() = std::move(table_op);
         }
         else
         {
             assert(local_shards->table_schema_op_pool_.back() != nullptr);
-            schema_op_ = std::move(local_shards->table_schema_op_pool_.back());
+            CompositeOpSlot<UpsertTableOp>() =
+                std::move(local_shards->table_schema_op_pool_.back());
             local_shards->table_schema_op_pool_.pop_back();
 
-            schema_op_->Reset(req.table_name_->StringView(),
-                              req.table_name_->Engine(),
-                              *req.curr_image_,
-                              req.curr_schema_ts_,
-                              *req.dirty_image_,
-                              req.op_type_,
-                              this);
+            CompositeOpSlot<UpsertTableOp>()->Reset(
+                req.table_name_->StringView(),
+                req.table_name_->Engine(),
+                *req.curr_image_,
+                req.curr_schema_ts_,
+                *req.dirty_image_,
+                req.op_type_,
+                this);
         }
         lk.unlock();
 
-        PushOperation(schema_op_.get());
+        PushOperation(CompositeOpSlot<UpsertTableOp>().get());
     }
     else if (req.op_type_ == OperationType::AddIndex ||
              req.op_type_ == OperationType::DropIndex)
     {
-        std::unique_lock<std::mutex> lk(local_shards->table_index_op_pool_mux_);
+        std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
         if (local_shards->table_index_op_pool_.empty())
         {
             std::unique_ptr<UpsertTableIndexOp> index_op =
@@ -1026,27 +1027,29 @@ void TransactionExecution::ProcessTxRequest(UpsertTableTxRequest &req)
                     req.pack_sk_err_.get(),
                     this);
 
-            index_op_ = std::move(index_op);
+            CompositeOpSlot<UpsertTableIndexOp>() = std::move(index_op);
         }
         else
         {
             assert(local_shards->table_index_op_pool_.back() != nullptr);
-            index_op_ = std::move(local_shards->table_index_op_pool_.back());
+            CompositeOpSlot<UpsertTableIndexOp>() =
+                std::move(local_shards->table_index_op_pool_.back());
             local_shards->table_index_op_pool_.pop_back();
 
-            index_op_->Reset(req.table_name_->StringView(),
-                             req.table_name_->Engine(),
-                             *req.curr_image_,
-                             req.curr_schema_ts_,
-                             *req.dirty_image_,
-                             *req.alter_table_info_image_,
-                             req.op_type_,
-                             req.pack_sk_err_.get(),
-                             this);
+            CompositeOpSlot<UpsertTableIndexOp>()->Reset(
+                req.table_name_->StringView(),
+                req.table_name_->Engine(),
+                *req.curr_image_,
+                req.curr_schema_ts_,
+                *req.dirty_image_,
+                *req.alter_table_info_image_,
+                req.op_type_,
+                req.pack_sk_err_.get(),
+                this);
         }
         lk.unlock();
 
-        PushOperation(index_op_.get());
+        PushOperation(CompositeOpSlot<UpsertTableIndexOp>().get());
     }
     else
     {
@@ -1147,24 +1150,24 @@ void TransactionExecution::ProcessTxRequest(InvalidateTableCacheTxRequest &req)
     void_resp_ = &req.tx_result_;
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
 
-    std::unique_lock<std::mutex> lk(
-        local_shards->invalidate_table_cache_op_mux_);
+    std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
     if (local_shards->invalidate_table_cache_op_pool_.empty())
     {
-        invalidate_table_cache_composite_op_ =
+        CompositeOpSlot<InvalidateTableCacheCompositeOp>() =
             std::make_unique<InvalidateTableCacheCompositeOp>(req.table_name_,
                                                               this);
     }
     else
     {
-        invalidate_table_cache_composite_op_ =
+        CompositeOpSlot<InvalidateTableCacheCompositeOp>() =
             std::move(local_shards->invalidate_table_cache_op_pool_.back());
         local_shards->invalidate_table_cache_op_pool_.pop_back();
-        invalidate_table_cache_composite_op_->Reset(req.table_name_, this);
+        CompositeOpSlot<InvalidateTableCacheCompositeOp>()->Reset(
+            req.table_name_, this);
     }
     lk.unlock();
 
-    PushOperation(invalidate_table_cache_composite_op_.get());
+    PushOperation(CompositeOpSlot<InvalidateTableCacheCompositeOp>().get());
 }
 
 void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
@@ -1183,11 +1186,10 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
     bool_resp_ = &req.tx_result_;
 
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
-    std::unique_lock<std::mutex> lk(
-        local_shards->split_flush_range_op_pool_mux_);
+    std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
     if (local_shards->split_flush_range_op_pool_.empty())
     {
-        split_flush_op_ =
+        CompositeOpSlot<SplitFlushRangeOp>() =
             std::make_unique<SplitFlushRangeOp>(*req.table_name_,
                                                 std::move(req.schema_),
                                                 req.range_entry_,
@@ -1197,20 +1199,21 @@ void TransactionExecution::ProcessTxRequest(SplitFlushTxRequest &req)
     }
     else
     {
-        split_flush_op_ =
+        CompositeOpSlot<SplitFlushRangeOp>() =
             std::move(local_shards->split_flush_range_op_pool_.back());
         local_shards->split_flush_range_op_pool_.pop_back();
-        assert(split_flush_op_ != nullptr);
-        split_flush_op_->Reset(*req.table_name_,
-                               std::move(req.schema_),
-                               req.range_entry_,
-                               std::move(req.new_range_info_),
-                               this,
-                               req.is_dirty_);
+        assert(CompositeOpSlot<SplitFlushRangeOp>() != nullptr);
+        CompositeOpSlot<SplitFlushRangeOp>()->Reset(
+            *req.table_name_,
+            std::move(req.schema_),
+            req.range_entry_,
+            std::move(req.new_range_info_),
+            this,
+            req.is_dirty_);
     }
     lk.unlock();
 
-    PushOperation(split_flush_op_.get());
+    PushOperation(CompositeOpSlot<SplitFlushRangeOp>().get());
 }
 
 void TransactionExecution::ProcessTxRequest(
@@ -1219,18 +1222,20 @@ void TransactionExecution::ProcessTxRequest(
     void_resp_ = &data_migration_req.tx_result_;
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
 
-    std::lock_guard<std::mutex> lk(local_shards->data_migration_op_pool_mux_);
+    std::lock_guard<std::mutex> lk(local_shards->op_pool_mux_);
 
     if (local_shards->migration_op_pool_.empty())
     {
-        migration_op_ =
+        CompositeOpSlot<DataMigrationOp>() =
             std::make_unique<DataMigrationOp>(this, data_migration_req.status_);
     }
     else
     {
-        migration_op_ = std::move(local_shards->migration_op_pool_.back());
+        CompositeOpSlot<DataMigrationOp>() =
+            std::move(local_shards->migration_op_pool_.back());
         local_shards->migration_op_pool_.pop_back();
-        migration_op_->Reset(this, data_migration_req.status_);
+        CompositeOpSlot<DataMigrationOp>()->Reset(this,
+                                                  data_migration_req.status_);
     }
 
     if (data_migration_req.status_->next_bucket_idx_ != 0)
@@ -1240,7 +1245,7 @@ void TransactionExecution::ProcessTxRequest(
         void_resp_->Finish(void_);
     }
 
-    PushOperation(migration_op_.get());
+    PushOperation(CompositeOpSlot<DataMigrationOp>().get());
     Forward();
 }
 
@@ -1342,23 +1347,23 @@ void TransactionExecution::ProcessTxRequest(ClusterScaleTxRequest &req)
         return;
     }
 
-    std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
+    std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
     if (local_shards->cluster_scale_op_pool_.empty())
     {
-        cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
+        CompositeOpSlot<ClusterScaleOp>() = std::make_unique<ClusterScaleOp>(
             req.id_, req.scale_type_, std::move(new_ng_config), this);
     }
     else
     {
-        cluster_scale_op_ =
+        CompositeOpSlot<ClusterScaleOp>() =
             std::move(local_shards->cluster_scale_op_pool_.back());
         local_shards->cluster_scale_op_pool_.pop_back();
-        cluster_scale_op_->Reset(
+        CompositeOpSlot<ClusterScaleOp>()->Reset(
             req.id_, req.scale_type_, std::move(new_ng_config), this);
     }
     lk.unlock();
 
-    PushOperation(cluster_scale_op_.get());
+    PushOperation(CompositeOpSlot<ClusterScaleOp>().get());
 }
 
 void TransactionExecution::ProcessTxRequest(
@@ -1383,8 +1388,7 @@ void TransactionExecution::ProcessTxRequest(
         case OperationType::TruncateTable:
         case OperationType::Update:
         {
-            std::unique_lock<std::mutex> lk(
-                local_shards->table_schema_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
             if (Sharder::Instance()
                     .GetLocalCcShards()
                     ->table_schema_op_pool_.empty())
@@ -1401,16 +1405,17 @@ void TransactionExecution::ProcessTxRequest(
                     schema_op_msg.new_catalog_blob(),
                     operation_type,
                     this);
-                schema_op_ = std::move(table_op);
+                CompositeOpSlot<UpsertTableOp>() = std::move(table_op);
             }
             else
             {
                 assert(Sharder::Instance()
                            .GetLocalCcShards()
                            ->table_schema_op_pool_.back() != nullptr);
-                schema_op_ = std::move(Sharder::Instance()
-                                           .GetLocalCcShards()
-                                           ->table_schema_op_pool_.back());
+                CompositeOpSlot<UpsertTableOp>() =
+                    std::move(Sharder::Instance()
+                                  .GetLocalCcShards()
+                                  ->table_schema_op_pool_.back());
                 Sharder::Instance()
                     .GetLocalCcShards()
                     ->table_schema_op_pool_.pop_back();
@@ -1418,22 +1423,24 @@ void TransactionExecution::ProcessTxRequest(
                 TableEngine table_engine =
                     ::txlog::ToLocalType::ConvertTableEngine(
                         schema_op_msg.table_engine());
-                schema_op_->Reset(schema_op_msg.table_name_str(),
-                                  table_engine,
-                                  schema_op_msg.old_catalog_blob(),
-                                  schema_op_msg.catalog_ts(),
-                                  schema_op_msg.new_catalog_blob(),
-                                  operation_type,
-                                  this);
+                CompositeOpSlot<UpsertTableOp>()->Reset(
+                    schema_op_msg.table_name_str(),
+                    table_engine,
+                    schema_op_msg.old_catalog_blob(),
+                    schema_op_msg.catalog_ts(),
+                    schema_op_msg.new_catalog_blob(),
+                    operation_type,
+                    this);
             }
             lk.unlock();
+            UpsertTableOp *table_op = CompositeOpSlot<UpsertTableOp>().get();
 
             if (schema_op_msg.stage() ==
                 ::txlog::SchemaOpMessage::Stage::
                     SchemaOpMessage_Stage_PrepareSchema)
             {
-                schema_op_->prepare_log_op_.hd_result_.SetFinished();
-                schema_op_->op_ = &schema_op_->prepare_log_op_;
+                // The op resumes after its prepare log.
+                table_op->entry_ = UpsertTableOp::Entry::kAfterPrepareLog;
             }
             else
             {
@@ -1465,20 +1472,24 @@ void TransactionExecution::ProcessTxRequest(
                             schema_op_msg.new_catalog_blob(),
                             commit_ts_);
 
-                schema_op_->catalog_rec_.Set(
+                table_op->catalog_rec_.Set(
                     schema_ptr, dirty_schema_ptr, schema_ts);
-                schema_op_->commit_log_op_.hd_result_.SetFinished();
-                schema_op_->op_ = &schema_op_->commit_log_op_;
+                // A commit log that rolled the op back, at timestamp 0: its
+                // second phase discards the dirty schema.
+                table_op->post_all_lock_op_.write_type_ =
+                    schema_op_msg.rolled_back() ? PostWriteType::Rollback
+                                                : PostWriteType::PostCommit;
+                // The op resumes after its commit log.
+                table_op->entry_ = UpsertTableOp::Entry::kAfterCommitLog;
             }
 
-            PushOperation(schema_op_.get());
+            PushOperation(table_op);
             break;
         }
         case OperationType::AddIndex:
         case OperationType::DropIndex:
         {
-            std::unique_lock<std::mutex> lk(
-                local_shards->table_index_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
 
             if (local_shards->table_index_op_pool_.empty())
             {
@@ -1497,36 +1508,39 @@ void TransactionExecution::ProcessTxRequest(
                         nullptr,
                         this);
 
-                index_op_ = std::move(index_op);
+                CompositeOpSlot<UpsertTableIndexOp>() = std::move(index_op);
             }
             else
             {
                 assert(local_shards->table_index_op_pool_.back() != nullptr);
-                index_op_ =
+                CompositeOpSlot<UpsertTableIndexOp>() =
                     std::move(local_shards->table_index_op_pool_.back());
                 local_shards->table_index_op_pool_.pop_back();
                 TableEngine table_engine =
                     ::txlog::ToLocalType::ConvertTableEngine(
                         schema_op_msg.table_engine());
 
-                index_op_->Reset(schema_op_msg.table_name_str(),
-                                 table_engine,
-                                 schema_op_msg.old_catalog_blob(),
-                                 schema_op_msg.catalog_ts(),
-                                 schema_op_msg.new_catalog_blob(),
-                                 schema_op_msg.alter_table_info_blob(),
-                                 operation_type,
-                                 nullptr,
-                                 this);
+                CompositeOpSlot<UpsertTableIndexOp>()->Reset(
+                    schema_op_msg.table_name_str(),
+                    table_engine,
+                    schema_op_msg.old_catalog_blob(),
+                    schema_op_msg.catalog_ts(),
+                    schema_op_msg.new_catalog_blob(),
+                    schema_op_msg.alter_table_info_blob(),
+                    operation_type,
+                    nullptr,
+                    this);
             }
             lk.unlock();
+            UpsertTableIndexOp *index_op =
+                CompositeOpSlot<UpsertTableIndexOp>().get();
 
             if (schema_op_msg.stage() ==
                 ::txlog::SchemaOpMessage::Stage::
                     SchemaOpMessage_Stage_PrepareSchema)
             {
-                index_op_->prepare_log_op_.hd_result_.SetFinished();
-                index_op_->op_ = &index_op_->prepare_log_op_;
+                index_op->prepare_log_op_.hd_result_.SetFinished();
+                index_op->op_ = &index_op->prepare_log_op_;
             }
             else if (schema_op_msg.stage() ==
                      ::txlog::SchemaOpMessage::Stage::
@@ -1540,18 +1554,18 @@ void TransactionExecution::ProcessTxRequest(
                         ::txlog::ToLocalType::ConvertTableEngine(
                             schema_op_msg.table_engine());
                     // The positive inf key
-                    index_op_->last_finished_end_key_ =
+                    index_op->last_finished_end_key_ =
                         Sharder::Instance()
                             .GetLocalCcShards()
                             ->GetCatalogFactory(table_engine)
                             ->PositiveInfKey();
-                    index_op_->is_last_finished_key_str_ = false;
+                    index_op->is_last_finished_key_str_ = false;
                 }
                 else
                 {
-                    index_op_->last_finished_end_key_str_ =
+                    index_op->last_finished_end_key_str_ =
                         &schema_op_msg.last_key_value();
-                    index_op_->is_last_finished_key_str_ = true;
+                    index_op->is_last_finished_key_str_ = true;
                 }
 
                 // - Recovery catalog_rec_ to rebuild dirty schema image.
@@ -1565,20 +1579,20 @@ void TransactionExecution::ProcessTxRequest(
                 TableName table_name{table_name_sv, table_type, table_engine};
                 CatalogEntry *catalog_entry =
                     local_shards->GetCatalog(table_name, TxCcNodeId());
-                index_op_->catalog_rec_.Set(catalog_entry->schema_,
-                                            catalog_entry->dirty_schema_,
-                                            catalog_entry->schema_version_);
-                index_op_->catalog_rec_.SetSchemaImage(
+                index_op->catalog_rec_.Set(catalog_entry->schema_,
+                                           catalog_entry->dirty_schema_,
+                                           catalog_entry->schema_version_);
+                index_op->catalog_rec_.SetSchemaImage(
                     catalog_entry->schema_->SchemaImage());
-                index_op_->catalog_rec_.SetDirtySchemaImage(
+                index_op->catalog_rec_.SetDirtySchemaImage(
                     catalog_entry->dirty_schema_->SchemaImage());
 
                 // Recovery indexes_multikey_attr_.
-                index_op_->RecoveryIndexesMultiKeyAttr(
+                index_op->RecoveryIndexesMultiKeyAttr(
                     catalog_entry->dirty_schema_.get());
 
-                index_op_->op_ = &index_op_->prepare_data_log_op_;
-                index_op_->prepare_data_log_op_.hd_result_.SetFinished();
+                index_op->op_ = &index_op->prepare_data_log_op_;
+                index_op->prepare_data_log_op_.hd_result_.SetFinished();
             }
             else
             {
@@ -1612,21 +1626,28 @@ void TransactionExecution::ProcessTxRequest(
                             schema_op_msg.new_catalog_blob(),
                             commit_ts_);
 
-                index_op_->catalog_rec_.Set(
+                index_op->catalog_rec_.Set(
                     schema_ptr, dirty_schema_ptr, schema_ts);
-                index_op_->catalog_rec_.SetSchemaImage(
+                index_op->catalog_rec_.SetSchemaImage(
                     schema_ptr->SchemaImage());
-                index_op_->catalog_rec_.SetDirtySchemaImage(
+                index_op->catalog_rec_.SetDirtySchemaImage(
                     dirty_schema_ptr->SchemaImage());
 
                 // Recovery indexes_multikey_attr_.
-                index_op_->RecoveryIndexesMultiKeyAttr(dirty_schema_ptr.get());
+                index_op->RecoveryIndexesMultiKeyAttr(dirty_schema_ptr.get());
 
-                index_op_->commit_log_op_.hd_result_.SetFinished();
-                index_op_->op_ = &index_op_->commit_log_op_;
+                // A rolled-back add index commits at a real timestamp; the
+                // commit log's mark tells the recovered op to drop the index.
+                index_op->rolled_back_ = schema_op_msg.rolled_back();
+                index_op->post_all_lock_op_.write_type_ =
+                    schema_op_msg.rolled_back() ? PostWriteType::Rollback
+                                                : PostWriteType::PostCommit;
+
+                index_op->commit_log_op_.hd_result_.SetFinished();
+                index_op->op_ = &index_op->commit_log_op_;
             }
 
-            PushOperation(index_op_.get());
+            PushOperation(index_op);
             break;
         }
         default:
@@ -1667,8 +1688,7 @@ void TransactionExecution::ProcessTxRequest(
 
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
     std::unique_ptr<SplitFlushRangeOp> split_range_op = nullptr;
-    std::unique_lock<std::mutex> lk(
-        local_shards->split_flush_range_op_pool_mux_);
+    std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
     if (local_shards->split_flush_range_op_pool_.empty())
     {
         split_range_op = std::make_unique<SplitFlushRangeOp>(
@@ -1712,8 +1732,8 @@ void TransactionExecution::ProcessTxRequest(
     LOG(INFO) << "Recovering split flush tx " << TxNumber() << " on table "
               << table_name.StringView() << ", range id "
               << recover_req.range_entry_->GetRangeInfo()->PartitionId();
-    split_flush_op_ = std::move(split_range_op);
-    PushOperation(split_flush_op_.get());
+    CompositeOpSlot<SplitFlushRangeOp>() = std::move(split_range_op);
+    PushOperation(CompositeOpSlot<SplitFlushRangeOp>().get());
 }
 
 void TransactionExecution::Process(InitTxnOperation &init_txn)
@@ -2305,7 +2325,7 @@ void TransactionExecution::Process(ReadLocalOperation &lock_local)
                                *lock_local.hd_result_,
                                IsolationLevel::RepeatableRead,
                                CcProtocol::Locking,
-                               false,
+                               lock_local.is_for_write_,
                                false,
                                lock_local.execute_immediately_);
     if (finished)
@@ -4519,20 +4539,18 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                  wset_entry.forward_addr_)
             {
                 // If the wset entry needs to be double written into different
-                // ngs, write log for both ngs.
+                // ngs, write log for both ngs: every such key of the tx goes
+                // into the other ng's blob, which is all that ng's recovery
+                // has of it until that ng checkpoints it (a range split moving
+                // the key to that ng).
                 uint32_t forward_ng_id =
                     Sharder::Instance().ShardToCcNodeGroup(forward_shard_code);
-                auto [table_rec_it, inserted] =
-                    ng_table_set.try_emplace(forward_ng_id);
-                if (!inserted)
-                {
-                    continue;
-                }
+                auto table_rec_it = ng_table_set.try_emplace(forward_ng_id);
                 std::unordered_map<
                     TableName,
                     std::vector<
                         std::pair<const TxKey *, const WriteSetEntry *>>>
-                    &table_rec_set = table_rec_it->second.second;
+                    &table_rec_set = table_rec_it.first->second.second;
 
                 auto rec_vec_it = table_rec_set.emplace(
                     std::piecewise_construct,
@@ -4540,7 +4558,18 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                                           table_name.Type(),
                                           table_name.Engine()),
                     std::forward_as_tuple());
-                rec_vec_it.first->second.emplace_back(&write_key, &wset_entry);
+                std::vector<std::pair<const TxKey *, const WriteSetEntry *>>
+                    &rec_vec = rec_vec_it.first->second;
+                // A key double written to several cores of one ng is logged
+                // there once. The key's own ng and its forward ngs all get it
+                // in this pass alone, so an ng that has it already has it
+                // last: its own ng, or a forward ng an earlier forward
+                // address of the key named.
+                if (!rec_vec.empty() && rec_vec.back().first == &write_key)
+                {
+                    continue;
+                }
+                rec_vec.emplace_back(&write_key, &wset_entry);
             }
         }
     }
@@ -5704,9 +5733,14 @@ void TransactionExecution::ReleaseMetaDataReadLock(
 void TransactionExecution::ReleaseCatalogWriteAll(
     CcHandlerResult<PostProcessResult> &catalog_post_all_hd_result)
 {
-    uint64_t commit_ts = TxStatus() == TxnStatus::Committed
-                             ? commit_ts_
-                             : TransactionOperation::tx_op_failed_ts_;
+    // A committed tx promotes the dirty schema its FlushUpdateTableOp
+    // installed; an aborted one prepared nothing on the catalog and rolls back
+    // at timestamp 0, only releasing its locks.
+    const bool committed = TxStatus() == TxnStatus::Committed;
+    const uint64_t commit_ts =
+        committed ? commit_ts_ : TransactionOperation::tx_op_failed_ts_;
+    const PostWriteType write_type =
+        committed ? PostWriteType::PostCommit : PostWriteType::Rollback;
 
     std::shared_ptr<std::set<uint32_t>> all_node_groups =
         Sharder::Instance().AllNodeGroups();
@@ -5733,7 +5767,7 @@ void TransactionExecution::ReleaseCatalogWriteAll(
                 commit_ts,
                 catalog_post_all_hd_result,
                 OperationType::Update,
-                PostWriteType::PostCommit,
+                write_type,
                 abort_if_oom);
         }
     }
@@ -5750,7 +5784,7 @@ void TransactionExecution::ReleaseCatalogWriteAll(
                                   commit_ts,
                                   catalog_post_all_hd_result,
                                   OperationType::Update,
-                                  PostWriteType::PostCommit,
+                                  write_type,
                                   abort_if_oom);
     }
 
@@ -7908,42 +7942,44 @@ void TransactionExecution::RecoverDataMigration(
 {
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
 
-    std::lock_guard<std::mutex> lk(local_shards->data_migration_op_pool_mux_);
+    std::lock_guard<std::mutex> lk(local_shards->op_pool_mux_);
 
     if (local_shards->migration_op_pool_.empty())
     {
-        migration_op_ = std::make_unique<DataMigrationOp>(this, status);
+        CompositeOpSlot<DataMigrationOp>() =
+            std::make_unique<DataMigrationOp>(this, status);
     }
     else
     {
-        migration_op_ = std::move(local_shards->migration_op_pool_.back());
+        CompositeOpSlot<DataMigrationOp>() =
+            std::move(local_shards->migration_op_pool_.back());
         local_shards->migration_op_pool_.pop_back();
-        migration_op_->Reset(this, status);
+        CompositeOpSlot<DataMigrationOp>()->Reset(this, status);
     }
+    DataMigrationOp *migration_op = CompositeOpSlot<DataMigrationOp>().get();
     if (migrate_msg)
     {
-        migration_op_->migrate_bucket_idx_ = cur_idx;
-        migration_op_->PrepareNextRoundBuckets();
+        migration_op->migrate_bucket_idx_ = cur_idx;
+        migration_op->PrepareNextRoundBuckets();
 
         switch (migrate_msg->stage())
         {
         case ::txlog::BucketMigrateStage::BeforeLocking:
         {
-            migration_op_->op_ = &migration_op_->write_before_locking_log_op_;
-            migration_op_->write_before_locking_log_op_.hd_result_
-                .SetFinished();
+            migration_op->op_ = &migration_op->write_before_locking_log_op_;
+            migration_op->write_before_locking_log_op_.hd_result_.SetFinished();
             break;
         }
         case ::txlog::BucketMigrateStage::PrepareMigrate:
         {
-            migration_op_->op_ = &migration_op_->prepare_log_op_;
-            migration_op_->prepare_log_op_.hd_result_.SetFinished();
+            migration_op->op_ = &migration_op->prepare_log_op_;
+            migration_op->prepare_log_op_.hd_result_.SetFinished();
             break;
         }
         case ::txlog::BucketMigrateStage::CommitMigrate:
         {
-            migration_op_->op_ = &migration_op_->commit_log_op_;
-            migration_op_->commit_log_op_.hd_result_.SetFinished();
+            migration_op->op_ = &migration_op->commit_log_op_;
+            migration_op->commit_log_op_.hd_result_.SetFinished();
             break;
         }
         default:
@@ -7953,7 +7989,7 @@ void TransactionExecution::RecoverDataMigration(
         }
     }
 
-    PushOperation(migration_op_.get());
+    PushOperation(migration_op);
 }
 
 void TransactionExecution::RecoverClusterScale(
@@ -7993,7 +8029,7 @@ void TransactionExecution::RecoverClusterScale(
     }
     LocalCcShards *local_shards = Sharder::Instance().GetLocalCcShards();
 
-    std::unique_lock<std::mutex> lk(local_shards->cluster_scale_op_mux_);
+    std::unique_lock<std::mutex> lk(local_shards->op_pool_mux_);
     ClusterScaleOpType op_type = ClusterScaleOpType::AddNodeGroup;
     switch (scale_op_msg.event_type())
     {
@@ -8011,19 +8047,19 @@ void TransactionExecution::RecoverClusterScale(
     }
     if (local_shards->cluster_scale_op_pool_.empty())
     {
-        cluster_scale_op_ = std::make_unique<ClusterScaleOp>(
+        CompositeOpSlot<ClusterScaleOp>() = std::make_unique<ClusterScaleOp>(
             scale_op_msg.id(), op_type, std::move(new_ng_configs), this);
     }
     else
     {
-        cluster_scale_op_ =
+        CompositeOpSlot<ClusterScaleOp>() =
             std::move(local_shards->cluster_scale_op_pool_.back());
         local_shards->cluster_scale_op_pool_.pop_back();
-        cluster_scale_op_->Reset(
+        CompositeOpSlot<ClusterScaleOp>()->Reset(
             scale_op_msg.id(), op_type, std::move(new_ng_configs), this);
     }
 
-    ClusterScaleOp *op = cluster_scale_op_.get();
+    ClusterScaleOp *op = CompositeOpSlot<ClusterScaleOp>().get();
 
     if (op_type == ClusterScaleOpType::AddNodeGroup)
     {

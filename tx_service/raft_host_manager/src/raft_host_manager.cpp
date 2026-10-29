@@ -965,26 +965,6 @@ void RaftHostManager::InitLogAgent(std::vector<std::string> &ip_list,
     }
 }
 
-void RaftHostManager::NotifyLogReplay(uint32_t ng_id,
-                                      int64_t term,
-                                      uint64_t start_ts)
-{
-    if (log_agent_)
-    {
-        LOG(INFO) << "Notified log groups to start log replay for ng#" << ng_id
-                  << "with term " << term << ", start ts " << start_ts << "...";
-        log_agent_->ReplayLog(ng_id,
-                              term,
-                              node_config_.host_name_,
-                              node_config_.port_ + 2,
-                              -1,
-                              start_ts,
-                              log_agent_interrupt_);
-        LOG(INFO) << "Notified log groups to start log replay for ng#" << ng_id
-                  << " with term " << term;
-    }
-}
-
 void RaftHostManager::NotifyNewLeaderStart(uint32_t leader_ng_id, int64_t term)
 {
     uint32_t node_id;
@@ -1675,7 +1655,8 @@ void RaftNode::on_leader_start(int64_t term)
                   << " escalated to leader of node group " << ng_id_;
 
         host_manager_.NotifyNewLeaderStart(ng_id_, term);
-        host_manager_.NotifyLogReplay(ng_id_, term, resp.log_replay_start_ts());
+        // The tx node asks the log groups to replay the log itself, at the
+        // end of its OnLeaderStart, and asks again if they do not answer.
     }
 }
 

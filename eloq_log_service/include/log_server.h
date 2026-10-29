@@ -60,7 +60,8 @@ public:
               uint32_t snapshot_interval = 600,
               bool enable_request_checkpoint = false,
               uint32_t check_replay_log_size_interval_sec = 10,
-              uint64_t notify_checkpointer_threshold_size = 128 * 1024 * 1024);
+              uint64_t notify_checkpointer_threshold_size = 128 * 1024 * 1024,
+              uint64_t cdc_retention_seconds = 0);
 
     ~LogServer()
     {
@@ -78,6 +79,20 @@ public:
     }
 
     int Start(bool enable_brpc_builtin_services = true);
+
+    /**
+     * @brief Starts exporting the log groups' change data capture metrics. The
+     * metrics registry is made after the log server, so this is called once
+     * both exist.
+     *
+     * @param registry The process's metrics registry; outlives the server.
+     * @param node_labels The node's common labels.
+     */
+    void EnableMetrics(metrics::MetricsRegistry *registry,
+                       const metrics::CommonLabels &node_labels)
+    {
+        raft_log_service_.EnableMetrics(registry, node_labels);
+    }
 
     const std::string &GetStoragePath() const
     {

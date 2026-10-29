@@ -196,10 +196,34 @@ public:
     void TriggerAction(FaultEntry *entry);
     void InjectFault(std::string fault_name, std::string paras);
 
+    /**
+     * @brief Whether this build compiles the fault points in.
+     *
+     * The fault points (ACTION_FAULT_INJECTOR, CODE_FAULT_INJECTOR) expand to
+     * nothing unless the data substrate is built with WITH_FAULT_INJECT. The
+     * answer comes from the data substrate's own compilation, so a caller built
+     * with other flags (an API layer's command, a test) still gets it right.
+     * Without the fault points, InjectFault still records the fault, but the
+     * fault never fires.
+     *
+     * @return true if the fault points are compiled in.
+     */
+    static bool CompiledIn();
+
 private:
-    FaultInject()
-    {
-    }
+    /**
+     * @brief Arms the faults the environment variable ELOQ_TX_FAULT_INJECT
+     * names, in fault-injection builds: comma-separated entries, each "name"
+     * or "name:params" (params as InjectFault takes them). For tests that need
+     * a fault from the process's start, before it serves commands that arm
+     * one; such a command removes it as any other.
+     *
+     * @note Defined in fault_inject.cpp, which the data substrate compiles
+     * with its WITH_FAULT_INJECT: an API layer that includes this header is
+     * built without it, and an inline definition compiled there could be the
+     * one the linker keeps.
+     */
+    FaultInject();
 
     ~FaultInject()
     {

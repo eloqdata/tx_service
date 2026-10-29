@@ -211,8 +211,6 @@ LocalCcShards::LocalCcShards(
                            .count();
     ts_base_.store(ts_base);
     local_clock.store(ts_base);
-    timer_thd_ = std::thread([this] { TimerRun(); });
-    pthread_setname_np(timer_thd_.native_handle(), "tx_timer");
 
     // Start background thread to initialize table_ranges_heap. offload heap
     // init to avoid concurrent access to heap with main thread.
@@ -283,6 +281,11 @@ LocalCcShards::LocalCcShards(
         fast_meta_data_mux_.mux_ptrs_[i] = &cc_shards_[i]->meta_data_mux_;
     }
 
+    // The timer thread walks cc_shards_ on every tick, so it starts only once
+    // the vector is complete. The clocks it refreshes were seeded above.
+    timer_thd_ = std::thread([this] { TimerRun(); });
+    pthread_setname_np(timer_thd_.native_handle(), "tx_timer");
+
     InitRangeBuckets(ng_id_, ng_ids, cluster_config_version);
 
     if (prebuilt_tables)
@@ -320,6 +323,8 @@ LocalCcShards::LocalCcShards(
         leader_changes_metric_labels.emplace_back(
             "ng_id", std::move(ng_id_label_values));
         auto is_leader_metric_labels = leader_changes_metric_labels;
+        // The cluster config map of every node group this node may lead.
+        auto gate_paused_metric_labels = leader_changes_metric_labels;
         node_meter_->Register(metrics::NAME_LEADER_CHANGES,
                               metrics::Type::Counter,
                               std::move(leader_changes_metric_labels));
@@ -344,6 +349,9 @@ LocalCcShards::LocalCcShards(
                                  "persist",
                                  "metadata",
                                  "unknown"}}});
+        node_meter_->Register(metrics::NAME_CLUSTER_GATE_PAUSED,
+                              metrics::Type::Gauge,
+                              std::move(gate_paused_metric_labels));
     }
 }
 
@@ -545,6 +553,23 @@ void LocalCcShards::TimerRun()
                 old_clock_ts, clock_ts, std::memory_order_relaxed);
         }
         UpdateTsBase(clock_ts);
+
+        // Deferred eviction retries: a shard whose last pass ended with
+        // requests parked and nothing to evict re-checks on this tick. The
+        // walk runs under lk (timer_terminate_mux_); a worker that exits at
+        // shutdown frees its shard under the same mutex (FreeCcShard), so a
+        // slot is either a live shard or null here, never one being destroyed.
+        const uint64_t steady_now_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        for (auto &shard : cc_shards_)
+        {
+            if (shard != nullptr)
+            {
+                shard->FireCleanRetryIfDue(steady_now_us);
+            }
+        }
 
         timer_terminate_cv_.wait_for(
             lk, 100ms, [this]() { return timer_terminate_ == true; });

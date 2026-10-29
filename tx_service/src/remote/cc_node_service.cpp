@@ -1203,8 +1203,7 @@ void CcNodeService::GenerateSkFromPk(
             LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
             std::unique_ptr<SkGenerator> sk_generator = nullptr;
             {
-                std::lock_guard<std::mutex> lk(
-                    cc_shards->table_index_op_pool_mux_);
+                std::lock_guard<std::mutex> lk(cc_shards->op_pool_mux_);
                 if (cc_shards->sk_generator_pool_.empty())
                 {
                     sk_generator = std::make_unique<SkGenerator>();
@@ -1270,8 +1269,7 @@ void CcNodeService::GenerateSkFromPk(
 
             // recycle skgenerator
             {
-                std::lock_guard<std::mutex> lk(
-                    cc_shards->table_index_op_pool_mux_);
+                std::lock_guard<std::mutex> lk(cc_shards->op_pool_mux_);
                 cc_shards->sk_generator_pool_.emplace_back(
                     std::move(sk_generator));
             }
@@ -2185,16 +2183,21 @@ void CcNodeService::FetchNodeInfo(
     response->set_ng_id(ng_id);
     response->set_node_id(node_id);
 
-    if (Sharder::Instance().LeaderTerm(ng_id) > 0)
+    const int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id);
+    const int64_t candidate_term =
+        Sharder::Instance().CandidateLeaderTerm(ng_id);
+    if (leader_term > 0)
     {
         response->set_role(NodeRole::LeaderNode);
         response->set_status(NodeStatus::Online);
+        response->set_leader_term(leader_term);
         return;
     }
-    else if (Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+    else if (candidate_term > 0)
     {
         response->set_role(NodeRole::LeaderNode);
         response->set_status(NodeStatus::Loading);
+        response->set_leader_term(candidate_term);
         return;
     }
     else if (Sharder::Instance().NativeNodeGroup() == ng_id)

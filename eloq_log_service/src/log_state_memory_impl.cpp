@@ -42,6 +42,9 @@ LogStateMemoryImpl::GetLogReplayList(uint32_t node_group_id,
     size_t rs_size = ddl_list.size() - scale_size - schema_size;
     LOG(INFO) << "split_range_op_list size: " << rs_size;
 
+    // After the cluster scale list, which asserts it holds at most one item.
+    GetClusterGateList(ddl_list);
+
     std::vector<Item::Pointer> data_log_list;
     auto shard = cc_ng_state_.find(node_group_id);
     if (shard != cc_ng_state_.end())

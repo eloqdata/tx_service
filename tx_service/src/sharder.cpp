@@ -168,7 +168,7 @@ int Sharder::Init(
         for (uint32_t nid = 0; nid < 1000; nid++)
         {
             ng_leader_cache_[nid].store(nid);
-            ng_leader_term_cache_[nid].store(-1);
+            ng_leader_term_cache_[nid] = -1;
             leader_term_cache_[nid].store(-1);
             candidate_leader_term_cache_[nid].store(-1);
         }
@@ -477,21 +477,11 @@ int Sharder::Init(
     {
         bool retry = false;
         uint64_t start_ts = 0;
+        // OnLeaderStart asks the log service to replay the log.
         cluster_config_.cc_nodes_.at(native_ng_)
             ->OnLeaderStart(1, start_ts, retry);
         assert(!retry);
-        // Notify log service to replay log
-        if (log_agent_)
-        {
-            log_agent_->ReplayLog(native_ng_,
-                                  1,
-                                  host_name_,
-                                  GET_LOG_REPLAY_RPC_PORT(port_),
-                                  -1,
-                                  start_ts,
-                                  log_agent_interrupt_);
-        }
-        else
+        if (!log_agent_)
         {
             // Test env. Directly finish log replay.
             Sharder::Instance().SetLeaderTerm(native_ng_, 1);
@@ -668,42 +658,83 @@ void Sharder::UpdateLeader(uint32_t ng_id)
                 remote::GetLeaderResponse resp;
                 remote::HostMangerService_Stub stub(&hm_channel_);
                 stub.GetLeader(&cntl, &req, &resp, nullptr);
-                if (!cntl.Failed() && !resp.error())
+                if (cntl.Failed() || resp.error())
                 {
-                    UpdateLeader(ng_id, resp.node_id());
+                    return;
                 }
+                // The host manager names the leader without its term; the
+                // leader itself knows it.
+                const uint32_t leader_node_id = resp.node_id();
+                const int64_t term = FetchLeaderTerm(ng_id, leader_node_id);
+                if (term < 0)
+                {
+                    LOG(INFO) << "leader lookup of ng" << ng_id
+                              << " named node_id " << leader_node_id
+                              << ", which does not lead it now; cache kept";
+                    return;
+                }
+                UpdateLeader(ng_id, leader_node_id, term);
             });
     }
 }
 
+int64_t Sharder::FetchLeaderTerm(uint32_t ng_id, uint32_t node_id)
+{
+    if (node_id == node_id_)
+    {
+        const int64_t leader_term = LeaderTerm(ng_id);
+        return leader_term > 0 ? leader_term : CandidateLeaderTerm(ng_id);
+    }
+    std::shared_ptr<brpc::Channel> channel = GetCcNodeServiceChannel(node_id);
+    if (channel == nullptr)
+    {
+        return -1;
+    }
+    remote::CcRpcService_Stub stub(channel.get());
+    remote::FetchNodeInfoRequest req;
+    req.set_ng_id(ng_id);
+    req.set_node_id(node_id);
+    remote::FetchNodeInfoResponse resp;
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(1000);
+    stub.FetchNodeInfo(&cntl, &req, &resp, nullptr);
+    if (cntl.Failed())
+    {
+        UpdateCcNodeServiceChannel(node_id, channel);
+        return -1;
+    }
+    return resp.role() == remote::NodeRole::LeaderNode && resp.leader_term() > 0
+               ? resp.leader_term()
+               : -1;
+}
+
 void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id, int64_t term)
 {
-    auto cached_leader_term =
-        ng_leader_term_cache_[ng_id].load(std::memory_order_relaxed);
-    // If the term is passed and out-dated, skip it.
-    if (term != -1 && cached_leader_term != -1 && term <= cached_leader_term)
     {
-        DLOG(INFO) << "skip out-dated node group leader update, ng: " << ng_id
-                   << ", term: " << term
-                   << ", cached term: " << cached_leader_term;
-        return;
-    }
-
-    while (!ng_leader_term_cache_[ng_id].compare_exchange_weak(
-        cached_leader_term, term))
-    {
-        if (term != -1 && cached_leader_term != -1 &&
-            term <= cached_leader_term)
+        std::lock_guard<std::mutex> lk(ng_leader_mux_);
+        const int64_t cached_leader_term = ng_leader_term_cache_[ng_id];
+        if (term <= cached_leader_term)
         {
             DLOG(INFO) << "skip out-dated node group leader update, ng: "
                        << ng_id << ", term: " << term
                        << ", cached term: " << cached_leader_term;
             return;
         }
+        ng_leader_term_cache_[ng_id] = term;
+        ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
     }
     LOG(INFO) << "update node group ng" << ng_id
-              << " leader to node_id: " << node_id;
-    ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
+              << " leader to node_id: " << node_id << ", term: " << term;
+    if (local_shards_ != nullptr && local_shards_->store_hd_ != nullptr)
+    {
+        // The data store's direct accesses to the group follow its leader. The
+        // term is the version of the group's shard, the one every node derives
+        // alike, and orders these moves however they arrive there. Passed on
+        // even when the leader is the same node: the shard's version must keep
+        // up with the term, or a delayed redirect at a version between the two
+        // (a leader this node missed) would still be accepted.
+        local_shards_->store_hd_->OnLeaderChanged(ng_id, node_id, term);
+    }
 }
 
 void Sharder::FinishLogReplay(uint32_t cc_ng_id,
@@ -745,6 +776,20 @@ bool Sharder::CheckLogGroupReplayFinished(uint32_t cc_ng_id,
 
     return find_it->second->CheckLogGroupReplayFinished(log_group_id,
                                                         cc_ng_term);
+}
+
+void Sharder::RequestLogReplay(uint32_t cc_ng_id,
+                               int64_t cc_ng_term,
+                               uint64_t replay_start_ts)
+{
+    if (log_agent_ == nullptr || recovery_service_ == nullptr)
+    {
+        return;
+    }
+    LOG(INFO) << "Requesting log replay for ng: " << cc_ng_id
+              << " at term: " << cc_ng_term << " from ts: " << replay_start_ts
+              << " on its leader start";
+    recovery_service_->ReplayLog(cc_ng_id, cc_ng_term, -1, replay_start_ts);
 }
 
 void Sharder::WaitClusterReady()

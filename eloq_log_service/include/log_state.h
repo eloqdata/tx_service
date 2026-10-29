@@ -4,16 +4,20 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "cdc_scan.h"
 #include "log.pb.h"
 
 namespace txlog
@@ -23,7 +27,8 @@ enum struct LogItemType
     DataLog,
     SchemaLog,
     SplitRangeLog,
-    ClusterScaleLog
+    ClusterScaleLog,
+    ClusterGateLog  ///< The log group's cluster gate slot, while it has one.
 };
 
 struct Item
@@ -115,6 +120,27 @@ public:
         uint64_t tx_number, uint32_t cc_ng_id, uint64_t lower_bound_ts = 0) = 0;
 
     /**
+     * @brief Serves one page of the CDC log scan (cdc_scan.h).
+     *
+     * Called from the RPC thread, concurrently with on_apply; only the leader
+     * calls it. Every implementation must read MinCkptTs() for
+     * `arrival_complete_ts` before it opens its view of the stores. The
+     * default is for states that keep no scannable history.
+     *
+     * @param request The scan request.
+     * @param[out] response The page; its `status` is left to the caller.
+     * @param[out] error Set to the reason when the result is not Ok.
+     * @return How the scan went; see CdcScanStatus.
+     */
+    virtual CdcScanStatus CdcScan(const CdcScanRequest & /*request*/,
+                                  CdcScanResponse * /*response*/,
+                                  std::string *error)
+    {
+        *error = "this log state keeps no history a CDC scan could read";
+        return CdcScanStatus::Unsupported;
+    }
+
+    /**
      * Stores cc node group's latest state.
      *
      * latest_txn_no_ is to keep track of the cc node group's latest committed
@@ -200,6 +226,17 @@ public:
                 LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
                           << ", ignore";
             }
+            else
+            {
+                // An index op holds the catalog write lock across its prepare
+                // log, so its CDC record goes in here, at the timestamp that
+                // log carries: the op's catalog version.
+                const uint32_t op_type = CdcDdlOpType(schema_op);
+                if (op_type == kCdcAddIndex || op_type == kCdcDropIndex)
+                {
+                    AppendCdcDdl(commit_ts, commit_ts, tx_no, schema_op);
+                }
+            }
         }
         else
         {
@@ -210,11 +247,11 @@ public:
                 CatalogOp &catalog_op = catalog_it->second;
                 if (new_stage > catalog_op.SchemasOpStage())
                 {
-                    // For the schema operation that need to deal with the data,
-                    // such as ADD INDEX.
                     if (new_stage == SchemaOpMessage_Stage::
                                          SchemaOpMessage_Stage_PrepareData)
                     {
+                        // For the schema operation that need to deal with the
+                        // data, such as ADD INDEX.
                         SchemaOpMessage &schema_op_msg =
                             *catalog_op.GetSchemaOpMsg(
                                 schema_op.table_name_str(),
@@ -225,26 +262,49 @@ public:
                             schema_op.last_key_value());
                         schema_op_msg.set_new_catalog_blob(
                             schema_op.new_catalog_blob());
+                        schema_op_msg.set_stage(new_stage);
                     }
-
-                    // Encounter flush error after write prepare log. Need to
-                    // set commit_ts_ to 0(previously set by prepare_log)
-                    if (commit_ts == 0 &&
-                        new_stage == SchemaOpMessage_Stage::
-                                         SchemaOpMessage_Stage_CommitSchema)
+                    else if (new_stage ==
+                             SchemaOpMessage_Stage::
+                                 SchemaOpMessage_Stage_CommitSchema)
                     {
-                        catalog_op.SetCommitTs(0);
+                        // The op's catalog version, the timestamp its prepare
+                        // log carried, before the commit log's replaces it.
+                        const uint64_t catalog_ts = catalog_op.CommitTs();
+                        // The commit log's timestamp replaces the prepare
+                        // log's: 0 for an op that failed after its prepare
+                        // log, else the commit timestamp, which CREATE, DROP
+                        // and TRUNCATE TABLE re-assign at the commit stage. An
+                        // op recovered from its commit log then resumes with
+                        // the timestamp it committed at.
+                        catalog_op.SetCommitTs(commit_ts);
+                        SchemaOpMessage &schema_op_msg =
+                            *catalog_op.GetSchemaOpMsg(
+                                schema_op.table_name_str(),
+                                schema_op.table_type());
+                        // A rolled-back add index commits at a real timestamp
+                        // too; recovery reads the mark instead.
+                        if (schema_op.rolled_back())
+                        {
+                            schema_op_msg.set_rolled_back(true);
+                        }
+                        schema_op_msg.set_stage(new_stage);
+                        // The commit log itself carries neither the engine
+                        // nor the op type; the prepare log's message does.
+                        RecordCdcDdlCommit(
+                            tx_no, catalog_ts, commit_ts, schema_op_msg);
                     }
-
-                    // Schema logs at CleanSchema stage will be kept in LogState
-                    // for some time instead of be erased immediately. This is
-                    // to filter those retried stale WriteLogRequest of previous
-                    // stage (prepare log) yet come to log service after clean
-                    // log finished. The schema log will be erased when all node
-                    // group's ckpt_ts are one hour greater than its commit ts.
-                    if (new_stage == SchemaOpMessage_Stage::
-                                         SchemaOpMessage_Stage_CleanSchema)
+                    else if (new_stage == SchemaOpMessage_Stage::
+                                              SchemaOpMessage_Stage_CleanSchema)
                     {
+                        // Schema logs at CleanSchema stage will be kept in
+                        // LogState for some time instead of be erased
+                        // immediately. This is to filter those retried stale
+                        // WriteLogRequest of previous stage (prepare log) yet
+                        // come to log service after clean log finished. The
+                        // schema log will be erased when all node group's
+                        // ckpt_ts are one hour greater than its commit ts.
+                        //
                         // For pure DDL transactions, CatalogOp contains only
                         // one catalog image. For logical alter table DDL inside
                         // DML transactions, CatalogOp might contain multiple
@@ -253,13 +313,6 @@ public:
                         // Clear the specified SchemaOpMsg.
                         catalog_op.Clear(schema_op.table_name_str(),
                                          schema_op.table_type());
-                    }
-                    else
-                    {
-                        catalog_op
-                            .GetSchemaOpMsg(schema_op.table_name_str(),
-                                            schema_op.table_type())
-                            ->set_stage(new_stage);
                     }
                 }
                 else if (new_stage == catalog_op.SchemasOpStage())
@@ -957,10 +1010,19 @@ public:
         snapshot_tx_catalog_ops_.clear();
         snapshot_tx_split_range_ops_.clear();
         snapshot_tx_cluster_scale_ops_.clear();
+        snapshot_cdc_ddl_history_.clear();
+        snapshot_cluster_gate_.reset();
     }
 
     virtual void Clear()
     {
+        // RecoverTx and CDC scans read this state from RPC threads, and a
+        // scan begun while this node led can outlast its step-down.
+        std::unique_lock lk(log_state_mutex_);
+        cdc_ddl_history_.clear();
+        snapshot_cdc_ddl_history_.clear();
+        cluster_gate_.reset();
+        snapshot_cluster_gate_.reset();
         cc_ng_info_.clear();
         snapshot_cc_ng_info_.clear();
         tx_catalog_ops_.clear();
@@ -1076,6 +1138,85 @@ public:
         return min_ckpt_ts_;
     }
 
+    /**
+     * @brief Sets how far behind the checkpoint the data log is kept for CDC
+     * consumers (docs/cdc-change-stream.md in the EloqDoc repo, §4.5).
+     *
+     * @param seconds The retention window; 0 keeps no window, which is how
+     *        the purges behaved before it existed.
+     */
+    void SetCdcRetentionSeconds(uint64_t seconds)
+    {
+        cdc_retention_us_.store(seconds * 1000 * 1000,
+                                std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief The CDC retention floor for a checkpoint.
+     *
+     * A purge may remove a file only if every key in it lies below the
+     * floor, so every record within the retention window behind the
+     * checkpoint stays readable.
+     *
+     * @param ckpt_ts The checkpoint timestamp, in microseconds like every
+     *        commit timestamp.
+     * @return `ckpt_ts` less the retention window, or 0 if the window reaches
+     *         past it.
+     */
+    uint64_t CdcRetentionFloor(uint64_t ckpt_ts) const
+    {
+        const uint64_t retention_us =
+            cdc_retention_us_.load(std::memory_order_relaxed);
+        return ckpt_ts > retention_us ? ckpt_ts - retention_us : 0;
+    }
+
+    /**
+     * @brief Drops the CDC DDL history's records below a data log purge's
+     * floor.
+     *
+     * Called by the purges of the data log (the RocksDB state's SST purge, the
+     * cloud state's move to the archive) whenever one runs, with the floor it
+     * purges by, so that DDL records leave with the data they are scanned
+     * with. Trimming at every checkpoint instead would drop each record as
+     * soon as a scan could return it unless a retention window is set. Runs
+     * on the purge's own thread.
+     *
+     * @param floor The purge's floor: records whose ddl_ts is below it go.
+     */
+    void TrimCdcDdlHistory(uint64_t floor)
+    {
+        std::unique_lock lk(log_state_mutex_);
+        cdc_ddl_history_.erase(
+            cdc_ddl_history_.begin(),
+            cdc_ddl_history_.lower_bound(CdcTimestampPosition(floor)));
+    }
+
+    /**
+     * @brief Copies part of the CDC DDL history, the source of a scan's DDL
+     * stream (CdcDdlHistoryCursor).
+     *
+     * Called from the RPC thread, concurrently with on_apply.
+     *
+     * @param after A DDL-stream position: empty, a timestamp
+     *        (CdcTimestampPosition) or a record's position (CdcDdlPosition).
+     * @param upper_ts The highest ddl_ts to copy.
+     * @param[out] records Appended with every record positioned strictly
+     *        after `after` whose ddl_ts is at most `upper_ts`, in position
+     *        order.
+     */
+    void CopyCdcDdlHistory(const std::string &after,
+                           uint64_t upper_ts,
+                           std::vector<CdcDdlRecord> *records) const
+    {
+        std::shared_lock s_lk(log_state_mutex_);
+        for (auto it = cdc_ddl_history_.upper_bound(after);
+             it != cdc_ddl_history_.end() && it->second.ddl_ts() <= upper_ts;
+             ++it)
+        {
+            records->push_back(it->second);
+        }
+    }
+
     uint64_t LastCkptTimestamp(uint32_t cc_ng_id)
     {
         // this func is also called in RecoverTx rpc thread, which might be
@@ -1114,12 +1255,283 @@ public:
     };
 
 protected:
+    /**
+     * @brief The snapshot file of the CDC DDL history, in the states that
+     * serve CDC scans.
+     */
+    static constexpr const char *kCdcDdlHistoryFile = "cdc_ddl_history";
+
+    /**
+     * @brief The snapshot file of the cluster gate slot, in the states that
+     * serve CDC scans.
+     */
+    static constexpr const char *kClusterGateFile = "cluster_gate";
+
+    /**
+     * @brief A scan's DDL stream over this state's CDC DDL history.
+     *
+     * @return A cursor that copies from the history when it is positioned.
+     */
+    CdcDdlHistoryCursor CdcDdlStream() const
+    {
+        return CdcDdlHistoryCursor(
+            [this](const std::string &after,
+                   uint64_t upper_ts,
+                   std::vector<CdcDdlRecord> *records)
+            { CopyCdcDdlHistory(after, upper_ts, records); });
+    }
+
+public:
+    /**
+     * @brief Applies a cluster gate log entry (EloqDoc
+     * docs/cdc-change-stream.md §6.2): the slot takes the entry's value if
+     * the entry is newer than the value it holds.
+     *
+     * The slot is one value overwritten in place, not a per-operation record,
+     * and is never purged: only a resume clears a pause. Every gate
+     * transaction is pinned to log group 0, so only that group's slot is ever
+     * set, and its successive entries carry increasing commit timestamps.
+     *
+     * @param txn The gate transaction.
+     * @param commit_ts The entry's commit timestamp, the value's version.
+     * @param msg The gate's new value.
+     */
+    void UpdateClusterGate(uint64_t txn,
+                           uint64_t commit_ts,
+                           const ClusterGateLogMessage &msg)
+    {
+        // on_apply writes; RecoverTx reads from an RPC thread.
+        std::unique_lock lk(log_state_mutex_);
+        if (cluster_gate_.has_value() && cluster_gate_->version >= commit_ts)
+        {
+            return;
+        }
+        cluster_gate_ = ClusterGateSlot{msg, commit_ts, txn};
+    }
+
+    /**
+     * @brief Whether a gate transaction's log entry was applied, for a write
+     * log retried after its result went unknown and for orphan lock recovery
+     * (RecoverTx), which must not clear a logged gate tx's lock.
+     *
+     * @param txn The gate transaction.
+     * @return true if the slot holds that transaction's value.
+     */
+    bool SearchTxClusterGate(uint64_t txn) const
+    {
+        std::shared_lock s_lk(log_state_mutex_);
+        return cluster_gate_.has_value() && cluster_gate_->txn == txn;
+    }
+
+    /**
+     * @brief The cluster gate slot, for tests and for the gate's replay.
+     *
+     * @param[out] msg The gate's value, when the slot holds one.
+     * @param[out] version Its commit timestamp.
+     * @param[out] txn The transaction that set it.
+     * @return false if the slot is empty.
+     */
+    bool GetClusterGate(ClusterGateLogMessage *msg,
+                        uint64_t *version,
+                        uint64_t *txn) const
+    {
+        std::shared_lock s_lk(log_state_mutex_);
+        if (!cluster_gate_.has_value())
+        {
+            return false;
+        }
+        *msg = cluster_gate_->value;
+        *version = cluster_gate_->version;
+        *txn = cluster_gate_->txn;
+        return true;
+    }
+
+protected:
     void MakeCopyOfNgInfoAndCatalogOps()
     {
         snapshot_cc_ng_info_ = cc_ng_info_;
         snapshot_tx_catalog_ops_ = tx_catalog_ops_;
         snapshot_tx_split_range_ops_ = tx_split_range_ops_;
         snapshot_tx_cluster_scale_ops_ = tx_cluster_scale_ops_;
+        // A purge thread may trim the history meanwhile (TrimCdcDdlHistory).
+        std::shared_lock s_lk(log_state_mutex_);
+        // Under the lock for the reason GetClusterGateList() gives.
+        snapshot_cluster_gate_ = cluster_gate_;
+        snapshot_cdc_ddl_history_.clear();
+        snapshot_cdc_ddl_history_.reserve(cdc_ddl_history_.size());
+        for (const auto &[position, record] : cdc_ddl_history_)
+        {
+            snapshot_cdc_ddl_history_.push_back(record);
+        }
+    }
+
+    /**
+     * @brief Writes the snapshot's copy of the CDC DDL history.
+     *
+     * The history has a file of its own in the states that serve CDC scans,
+     * so the file the memory state shares with them keeps its format. Layout:
+     * a u32 record count, then per record a u32 length and the serialized
+     * CdcDdlRecord, which holds everything its position is rebuilt from.
+     *
+     * @param os The snapshot file.
+     */
+    void WriteSnapshotCdcDdlHistoryTo(std::ofstream &os)
+    {
+        uint32_t cnt = snapshot_cdc_ddl_history_.size();
+        os.write(reinterpret_cast<char *>(&cnt), sizeof(uint32_t));
+        LOG(INFO) << "write CDC DDL history size: " << cnt;
+        std::string buf;
+        for (const CdcDdlRecord &record : snapshot_cdc_ddl_history_)
+        {
+            buf.clear();
+            record.SerializeToString(&buf);
+            uint32_t length = buf.size();
+            os.write(reinterpret_cast<char *>(&length), sizeof(uint32_t));
+            os.write(buf.data(), length);
+        }
+    }
+
+    /**
+     * @brief Loads a CDC DDL history that WriteSnapshotCdcDdlHistoryTo()
+     * wrote, replacing the current one.
+     *
+     * @param is The snapshot file.
+     * @return False if the file is truncated, a record's length runs past the
+     *         file's end, or a record does not parse; the history is then
+     *         left as it was.
+     */
+    bool LoadCdcDdlHistoryFrom(std::ifstream &is)
+    {
+        // The file's end bounds every record length read from it, so a
+        // corrupt length fails the load instead of sizing a huge buffer.
+        const std::streampos begin = is.tellg();
+        is.seekg(0, std::ios::end);
+        const std::streampos end = is.tellg();
+        is.seekg(begin);
+
+        std::map<std::string, CdcDdlRecord> history;
+        uint32_t cnt;
+        is.read(reinterpret_cast<char *>(&cnt), sizeof(uint32_t));
+        if (is.fail())
+        {
+            LOG(ERROR) << "snapshot read failed: could not read the CDC DDL "
+                          "history count";
+            return false;
+        }
+        std::string buf;
+        for (uint32_t i = 0; i < cnt; i++)
+        {
+            uint32_t length;
+            is.read(reinterpret_cast<char *>(&length), sizeof(uint32_t));
+            if (is.fail() || length > end - is.tellg())
+            {
+                LOG(ERROR) << "snapshot read failed: CDC DDL record " << i
+                           << " of " << cnt << " is truncated or corrupt";
+                return false;
+            }
+            buf.resize(length);
+            is.read(buf.data(), length);
+            CdcDdlRecord record;
+            if (is.fail() || !record.ParseFromString(buf))
+            {
+                LOG(ERROR) << "snapshot read failed: CDC DDL record " << i
+                           << " of " << cnt << " is truncated or corrupt";
+                return false;
+            }
+            std::string position =
+                CdcDdlPosition(record.ddl_ts(), record.txn_number());
+            history.emplace(std::move(position), std::move(record));
+        }
+        LOG(INFO) << "read CDC DDL history size: " << cnt;
+        std::unique_lock lk(log_state_mutex_);
+        cdc_ddl_history_ = std::move(history);
+        return true;
+    }
+
+    /**
+     * @brief Writes the snapshot's copy of the cluster gate slot.
+     *
+     * The slot has a file of its own, as the CDC DDL history does, so the
+     * file the memory state shares keeps its format. Layout: a u8 that is 1
+     * when the slot holds a value, then the u64 version, the u64 txn, a u32
+     * length and the serialized ClusterGateLogMessage.
+     *
+     * @param os The snapshot file.
+     */
+    void WriteSnapshotClusterGateTo(std::ofstream &os)
+    {
+        uint8_t present = snapshot_cluster_gate_.has_value() ? 1 : 0;
+        os.write(reinterpret_cast<char *>(&present), sizeof(uint8_t));
+        if (!present)
+        {
+            return;
+        }
+        std::string buf;
+        snapshot_cluster_gate_->value.SerializeToString(&buf);
+        uint32_t length = buf.size();
+        os.write(reinterpret_cast<char *>(&snapshot_cluster_gate_->version),
+                 sizeof(uint64_t));
+        os.write(reinterpret_cast<char *>(&snapshot_cluster_gate_->txn),
+                 sizeof(uint64_t));
+        os.write(reinterpret_cast<char *>(&length), sizeof(uint32_t));
+        os.write(buf.data(), length);
+        LOG(INFO) << "write cluster gate, version: "
+                  << snapshot_cluster_gate_->version
+                  << ", paused: " << snapshot_cluster_gate_->value.paused();
+    }
+
+    /**
+     * @brief Loads a cluster gate slot that WriteSnapshotClusterGateTo()
+     * wrote, replacing the current one.
+     *
+     * @param is The snapshot file.
+     * @return False if the file is truncated, the value's length runs past
+     *         the file's end, or the value does not parse; the slot is then
+     *         left as it was.
+     */
+    bool LoadClusterGateFrom(std::ifstream &is)
+    {
+        const std::streampos begin = is.tellg();
+        is.seekg(0, std::ios::end);
+        const std::streampos end = is.tellg();
+        is.seekg(begin);
+
+        uint8_t present;
+        is.read(reinterpret_cast<char *>(&present), sizeof(uint8_t));
+        if (is.fail() || present > 1)
+        {
+            LOG(ERROR) << "snapshot read failed: corrupt cluster gate file";
+            return false;
+        }
+        std::optional<ClusterGateSlot> slot;
+        if (present)
+        {
+            ClusterGateSlot read;
+            uint32_t length;
+            is.read(reinterpret_cast<char *>(&read.version), sizeof(uint64_t));
+            is.read(reinterpret_cast<char *>(&read.txn), sizeof(uint64_t));
+            is.read(reinterpret_cast<char *>(&length), sizeof(uint32_t));
+            if (is.fail() || length > end - is.tellg())
+            {
+                LOG(ERROR) << "snapshot read failed: the cluster gate is "
+                              "truncated or corrupt";
+                return false;
+            }
+            std::string buf(length, '\0');
+            is.read(buf.data(), length);
+            if (is.fail() || !read.value.ParseFromString(buf))
+            {
+                LOG(ERROR) << "snapshot read failed: the cluster gate is "
+                              "truncated or corrupt";
+                return false;
+            }
+            slot = std::move(read);
+            LOG(INFO) << "read cluster gate, version: " << slot->version
+                      << ", paused: " << slot->value.paused();
+        }
+        std::unique_lock lk(log_state_mutex_);
+        cluster_gate_ = std::move(slot);
+        return true;
     }
 
     void WriteSnapshotNgInfoAndCatalogOpsTo(std::ofstream &os)
@@ -1536,6 +1948,32 @@ protected:
         assert(res.size() <= 1);
     }
 
+    /**
+     * @brief Adds the cluster gate slot to a replay list, as one item, when
+     * the slot holds a value: a recovering node group reinstalls the gate
+     * from it, however old the value is.
+     *
+     * @param[out] res The replay list.
+     */
+    void GetClusterGateList(std::vector<Item::Pointer> &res)
+    {
+        // The list is built while the ReplayLog entry applies, on the thread
+        // that writes the slot, so no write interleaves today. The lock keeps
+        // the read safe if a list is ever built elsewhere: a torn copy of the
+        // protobuf would crash, not ship a stale item.
+        std::shared_lock s_lk(log_state_mutex_);
+        if (!cluster_gate_.has_value())
+        {
+            return;
+        }
+        std::string gate_str;
+        cluster_gate_->value.AppendToString(&gate_str);
+        res.emplace_back(std::make_shared<Item>(cluster_gate_->txn,
+                                                cluster_gate_->version,
+                                                std::move(gate_str),
+                                                LogItemType::ClusterGateLog));
+    }
+
     bool UpdateMinCkptTsOfAllNodeGroups()
     {
         uint64_t min_ts = UINT64_MAX;
@@ -1617,11 +2055,178 @@ protected:
         }
     }
 
+    /**
+     * @name CDC DDL history
+     * txservice::OperationType values of the schema ops the history records;
+     * the log service does not include the tx service's headers.
+     * @{
+     */
+    static constexpr uint32_t kCdcCreateTable = 5;  ///< CreateTable.
+    static constexpr uint32_t kCdcDropTable = 6;    ///< DropTable.
+    static constexpr uint32_t kCdcAddIndex = 8;     ///< AddIndex.
+    static constexpr uint32_t kCdcDropIndex = 9;    ///< DropIndex.
+    /** @} */
+
+    /**
+     * @brief Which kind of CDC DDL record a schema op's message makes, if
+     * any.
+     *
+     * Only EloqDoc's CREATE and DROP TABLE and its index ops are recorded.
+     * Index ops arrive as table ops too, with their index names in
+     * alter_table_info_blob. Not recorded: ALTER (OperationType::Update, how
+     * collMod reaches the tx service), TRUNCATE, other engines, and the
+     * logical alters logged inside DML.
+     *
+     * @param msg The schema op's message as the prepare log carried it.
+     * @return The op type (kCdcCreateTable, kCdcDropTable, kCdcAddIndex or
+     *         kCdcDropIndex), or 0 if the op is not recorded.
+     */
+    static uint32_t CdcDdlOpType(const SchemaOpMessage &msg)
+    {
+        if (msg.table_engine() != TableEngine::EloqDoc || !msg.has_table_op())
+        {
+            return 0;
+        }
+        const uint32_t op_type = msg.table_op().op_type();
+        return op_type == kCdcCreateTable || op_type == kCdcDropTable ||
+                       op_type == kCdcAddIndex || op_type == kCdcDropIndex
+                   ? op_type
+                   : 0;
+    }
+
+    /**
+     * @brief Adds a record to the CDC DDL history. Caller holds the unique
+     * lock.
+     *
+     * The record must be appended above the log group's checkpoint
+     * (docs/cdc-change-stream.md in the EloqDoc repo, §4.4): a scan may
+     * already have passed any lower timestamp. A replayed log entry appends
+     * the same record at the same position again, which leaves the history
+     * as it was.
+     *
+     * @param ddl_ts The record's stream timestamp.
+     * @param catalog_ts The op's catalog version, the timestamp its prepare
+     *        log carried.
+     * @param txn The schema op's transaction number.
+     * @param msg The schema op's message.
+     */
+    void AppendCdcDdl(uint64_t ddl_ts,
+                      uint64_t catalog_ts,
+                      uint64_t txn,
+                      const SchemaOpMessage &msg)
+    {
+        if (ddl_ts <= min_ckpt_ts_)
+        {
+            LOG(WARNING) << "CDC DDL record of txn " << txn << " at " << ddl_ts
+                         << " is not above the checkpoint " << min_ckpt_ts_
+                         << "; a CDC scan may already have passed it";
+        }
+        CdcDdlRecord record;
+        record.set_ddl_ts(ddl_ts);
+        record.set_catalog_ts(catalog_ts);
+        record.set_txn_number(txn);
+        *record.mutable_schema_op() = msg;
+        cdc_ddl_history_.try_emplace(CdcDdlPosition(ddl_ts, txn),
+                                     std::move(record));
+    }
+
+    /**
+     * @brief Updates the CDC DDL history for a schema op's commit log.
+     * Caller holds the unique lock.
+     *
+     * CREATE and DROP TABLE take the catalog write lock only before their
+     * commit log, so their record goes in here, at the commit log's
+     * timestamp; rolled back (at timestamp 0) they make none. An index op's
+     * record went in at its prepare log: a rollback at timestamp 0 takes it
+     * out again, and one at a timestamp above 0, the add index whose build
+     * broke a constraint, is a record of its own there, carrying the
+     * rolled-back mark, from which the runtime makes the dropIndexes event.
+     *
+     * @param txn The schema op's transaction number.
+     * @param catalog_ts The op's catalog version, the timestamp its prepare
+     *        log carried.
+     * @param commit_ts The commit log's timestamp.
+     * @param msg The op's message as the log state holds it after the commit
+     *        log, with its rolled-back mark.
+     */
+    void RecordCdcDdlCommit(uint64_t txn,
+                            uint64_t catalog_ts,
+                            uint64_t commit_ts,
+                            const SchemaOpMessage &msg)
+    {
+        const uint32_t op_type = CdcDdlOpType(msg);
+        if (op_type == kCdcCreateTable || op_type == kCdcDropTable)
+        {
+            if (commit_ts != 0 && !msg.rolled_back())
+            {
+                AppendCdcDdl(commit_ts, catalog_ts, txn, msg);
+            }
+        }
+        else if (op_type == kCdcAddIndex || op_type == kCdcDropIndex)
+        {
+            if (commit_ts == 0)
+            {
+                cdc_ddl_history_.erase(CdcDdlPosition(catalog_ts, txn));
+            }
+            else if (msg.rolled_back())
+            {
+                AppendCdcDdl(commit_ts, catalog_ts, txn, msg);
+            }
+        }
+    }
+
+    /**
+     * @brief The CDC DDL history (docs/cdc-change-stream.md in the EloqDoc
+     * repo, §4.3): one record per recorded schema op, two for a rolled-back
+     * add index, keyed by position (CdcDdlPosition), so that key order is
+     * (ddl_ts, txn) order.
+     *
+     * on_apply and the purges write it under the unique lock; scans copy
+     * from it under the shared lock. Kept in memory and saved in the raft
+     * snapshot by the states that serve CDC scans, and trimmed by the purges
+     * of the data log, by their floor (TrimCdcDdlHistory). The memory state
+     * purges nothing, and keeps its history too.
+     */
+    std::map<std::string, CdcDdlRecord> cdc_ddl_history_;
+    /**
+     * @brief The history's records as of the snapshot being saved, in
+     * position order. A plain copy: the snapshot only writes them out, and
+     * loading rebuilds each record's position.
+     */
+    std::vector<CdcDdlRecord> snapshot_cdc_ddl_history_;
+
+    /**
+     * @brief The cluster gate slot's value, as UpdateClusterGate keeps it.
+     */
+    struct ClusterGateSlot
+    {
+        ClusterGateLogMessage value;  ///< The gate's latest value.
+        uint64_t version{0};          ///< Commit timestamp of its entry.
+        uint64_t txn{0};              ///< The gate transaction that set it.
+    };
+
+    /**
+     * @brief The cluster gate slot (EloqDoc docs/cdc-change-stream.md
+     * §6.2): set by cluster gate log entries, saved in the raft snapshot by
+     * the states that serve CDC scans, replayed to recovering node groups,
+     * and never purged. Empty until the first gate entry, and in every log
+     * group but group 0.
+     */
+    std::optional<ClusterGateSlot> cluster_gate_;
+    /** @brief The slot as of the snapshot being saved. */
+    std::optional<ClusterGateSlot> snapshot_cluster_gate_;
+
     std::unordered_map<uint32_t, CcNgInfo> cc_ng_info_;
     std::unordered_map<uint32_t, CcNgInfo> snapshot_cc_ng_info_;
 
     // to erase finished schema ops and split range ops after one hour
     uint64_t min_ckpt_ts_{};
+
+    /**
+     * @brief The CDC retention window in microseconds. Set once at start and
+     * read by the purge threads, hence atomic.
+     */
+    std::atomic<uint64_t> cdc_retention_us_{0};
 
     struct CatalogOp
     {

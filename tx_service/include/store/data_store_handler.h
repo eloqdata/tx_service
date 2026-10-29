@@ -131,8 +131,8 @@ public:
     /**
      * @param write_time Orders schema writes for idempotence. Commits use
      * commit_ts. A failed CREATE INDEX rollback normally uses
-     * max(kv_create_index_op_.write_time_, commit_ts_bound_) + 1 so it
-     * overwrites the original catalog write. During recovery, rollback uses
+     * max(the op's timestamp, commit_ts_bound_) + 1 so it overwrites any
+     * earlier catalog write for the op. During recovery, rollback uses
      * LocalCcHandler::GetTsBaseValue() instead.
      */
     virtual void UpsertTable(
@@ -260,11 +260,20 @@ public:
     /**
      * @brief Upsert list of ranges into range table. This will also update
      * range slice sizes.
+     *
+     * @param table_name The table whose ranges are written.
+     * @param range_info The ranges to write. Only read: the caller keeps them,
+     * and retries the call with the same ranges after a failure.
+     * @param version The version the range entries are written at.
+     * @return true on success.
      */
     virtual bool UpsertRanges(const TableName &table_name,
-                              std::vector<SplitRangeInfo> range_info,
+                              const std::vector<SplitRangeInfo> &range_info,
                               uint64_t version)
     {
+        (void) table_name;
+        (void) range_info;
+        (void) version;
         return false;
     }
 
@@ -298,6 +307,29 @@ public:
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) = 0;
+
+    /**
+     * @brief Creates a table's kv table, and nothing else: no catalog row.
+     *
+     * The counterpart of DropKvTable. Add index calls it for each index being
+     * added before its prepare log, and CREATE TABLE for the table and each
+     * of its indexes after its prepare log, so that the kv tables exist in
+     * every state recovery can reach from a commit log that commits the op;
+     * the new schema reaches the kv catalog only after the commit log.
+     * Synchronous and idempotent: a retry, or a later create of a table whose
+     * kv tables a failed op left behind, creates them again. The default suits
+     * a store that keeps no per-table state.
+     *
+     * @param table_name The table to create.
+     * @param version The table's schema version.
+     * @return true on success.
+     */
+    virtual bool CreateKvTable(const TableName &table_name, uint64_t version)
+    {
+        (void) table_name;
+        (void) version;
+        return true;
+    }
 
     virtual bool DropKvTable(const std::string &kv_table_name) = 0;
 
@@ -509,6 +541,32 @@ public:
     virtual bool OnLeaderStop(uint32_t ng_id, int64_t term)
     {
         return true;
+    }
+
+    /**
+     * @brief Notifies the store of a node group's leader at a newer term.
+     *
+     * Called on every node when it learns of a newer leader term
+     * (Sharder::UpdateLeader), also when the leader is the same node,
+     * whether or not the node is a member of the group. Does nothing by
+     * default; a store whose data shards follow the node groups, each hosted
+     * by its group's leader, records the shard's host and version.
+     *
+     * @param ng_id The node group.
+     * @param leader_node_id The node now leading it.
+     * @param term The node group's leader term of that node, the one
+     * number every node derives for the same leadership, so a store that
+     * versions its shards by ownership can take it as the shard's version.
+     * Calls may arrive in any order; such a store ignores one whose term is
+     * below the shard's version, which leaves the newest leader in place.
+     */
+    virtual void OnLeaderChanged(uint32_t ng_id,
+                                 uint32_t leader_node_id,
+                                 int64_t term)
+    {
+        (void) ng_id;
+        (void) leader_node_id;
+        (void) term;
     }
 
     virtual std::string SnapshotSyncDestPath() const

@@ -24,9 +24,12 @@
 #include <utility>
 #include <vector>
 
+#include "cdc_long_poll.h"
 #include "log.pb.h"
 #include "log_shipping_agent.h"
 #include "log_state.h"
+#include "meter.h"
+#include "metrics.h"
 
 #if defined(LOG_STATE_TYPE_RKDB_CLOUD)
 #include "rocksdb_cloud_config.h"
@@ -115,7 +118,8 @@ public:
                          uint32_t snapshot_interval,
                          bool enable_request_checkpoint,
                          uint32_t check_replay_log_size_interval_sec,
-                         uint64_t notify_checkpointer_threshold_size)
+                         uint64_t notify_checkpointer_threshold_size,
+                         uint64_t cdc_retention_seconds)
         : log_group_id_(log_group_id),
           node_id_(node_id),
           node_(NULL),
@@ -189,6 +193,7 @@ public:
 #else
         log_state_ = std::make_unique<LogStateMemoryImpl>();
 #endif
+        log_state_->SetCdcRetentionSeconds(cdc_retention_seconds);
     }
 
     ~LogInstance() override
@@ -326,6 +331,44 @@ public:
     void CheckClusterScaleStatus(const LogRequest *request,
                                  LogResponse *response,
                                  google::protobuf::Closure *done);
+
+    /**
+     * @brief Serves one page of the CDC log scan (cdc_scan.h) from this
+     * replica, holding it first if the request asks to wait.
+     *
+     * A page with nothing emittable whose request has a wait_ms is parked
+     * (the long poll, cdc_long_poll.h) and served again once the group's
+     * arrival_complete_ts advances or the wait elapses; it is answered with
+     * NotLeader if this node stops leading meanwhile, and with the empty page
+     * if the client cancels. With cdc_scan_max_parked scans already parked,
+     * the empty page is answered at once.
+     *
+     * @param cntl The RPC controller; failures that no retry fixes fail the
+     *        RPC through it.
+     * @param request The scan request.
+     * @param[out] response The page, or the NotLeader answer.
+     * @param done Run when the response is complete, possibly after this
+     *        returns.
+     */
+    void CdcScan(brpc::Controller *cntl,
+                 const CdcScanRequest *request,
+                 CdcScanResponse *response,
+                 google::protobuf::Closure *done);
+
+    /**
+     * @brief Starts exporting the group's change data capture metrics:
+     * cdc_arrival_complete_ts and cdc_scan_parked_requests
+     * (log_service_metrics.h), labelled with the node's labels and lg_id.
+     *
+     * Called once, after the group has started serving: the metrics registry
+     * is made after the log service. The meter is complete before it is
+     * published, so a thread that sees it can use it.
+     *
+     * @param registry The process's metrics registry; outlives this instance.
+     * @param node_labels The node's common labels.
+     */
+    void EnableMetrics(metrics::MetricsRegistry *registry,
+                       const metrics::CommonLabels &node_labels);
 
     void TransferLeader(const TransferRequest *request,
                         TransferResponse *response,
@@ -503,6 +546,7 @@ private:
 
     void on_shutdown() override
     {
+        cdc_long_poll_.CompleteAll(CdcLongPoll::Wake::kStop);
     }
 
     void on_error(const ::braft::Error &e) override
@@ -566,6 +610,9 @@ private:
         int read_snapshot_status =
             log_state_->ReadSnapshot(snapshot_path, files);
         LOG(INFO) << "finish loading snapshot";
+        arrival_complete_ts_.store(log_state_->MinCkptTs(),
+                                   std::memory_order_release);
+        ReportArrivalComplete();
         return read_snapshot_status;
     }
 
@@ -589,6 +636,32 @@ private:
     void LogGroupLeaderUpdate();
 
     /**
+     * @return The address of the group's leader as this node knows it,
+     *         "host:port", or empty while no leader is known.
+     */
+    std::string LeaderAddress() const;
+
+    /**
+     * @brief Serves one page of the CDC log scan at once.
+     *
+     * Only the leader serves. A follower, or a leader that lost its term
+     * while the log state built the page, answers NotLeader with the
+     * leader's address; a leader whose log state cannot serve a consistent
+     * view yet answers NotLeader with its own, so the caller backs off and
+     * retries here.
+     *
+     * @param cntl The RPC controller; failures that no retry fixes fail the
+     *        RPC through it.
+     * @param request The scan request.
+     * @param[out] response The page, or the NotLeader answer.
+     * @return True if the page holds no record and none is left below its
+     *         bound: nothing was emittable, and the scan may wait.
+     */
+    bool ServeCdcScan(brpc::Controller *cntl,
+                      const CdcScanRequest *request,
+                      CdcScanResponse *response);
+
+    /**
      * If this node is the group's latest leader.
      * Only available when all nodes in the raft group set
      * |raft_enable_leader_lease| flag to true.
@@ -603,6 +676,39 @@ private:
     void ProposeTaskAndWait(braft::Task &task,
                             const LogRequest *request,
                             LogResponse *response);
+
+    /**
+     * @brief Sets cdc_arrival_complete_ts to arrival_complete_ts_, if the
+     * meter is published. Under arrival_metric_mutex_, so that
+     * EnableMetrics()'s first report and the apply thread's later ones
+     * cannot land out of order and leave the gauge behind the state.
+     */
+    void ReportArrivalComplete();
+
+    /**
+     * @brief The group's arrival_complete_ts as the apply thread last left
+     * it (LogState::MinCkptTs()), for EnableMetrics(), which runs on another
+     * thread and cannot read the log state.
+     */
+    std::atomic<uint64_t> arrival_complete_ts_{0};
+    /** @brief Serializes ReportArrivalComplete(). */
+    std::mutex arrival_metric_mutex_;
+
+    /** @brief Owns the meter EnableMetrics() makes; kept until destruction. */
+    std::unique_ptr<metrics::Meter> meter_;
+    /**
+     * @brief The meter once it is complete, else nullptr; what other threads
+     * read. Declared before cdc_long_poll_, whose size observer uses it, so it
+     * outlives the poll.
+     */
+    std::atomic<metrics::Meter *> published_meter_{nullptr};
+
+    /**
+     * @brief The parked long-poll CdcScan requests. Declared last so that it
+     * is destroyed first: its destructor waits for the completions, which
+     * serve scans from the members above.
+     */
+    CdcLongPoll cdc_long_poll_;
 };
 
 /**

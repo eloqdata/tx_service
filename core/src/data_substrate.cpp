@@ -20,6 +20,7 @@
  *
  */
 
+#include <bthread/bthread.h>
 #include <gflags/gflags.h>
 #include <sys/sysinfo.h>
 
@@ -33,6 +34,9 @@
 // clang-format on
 #include "data_substrate.h"
 #include "log_server.h"
+#if (WITH_LOG_SERVICE)
+#include "log_service_metrics.h"
+#endif
 #include "sequences/sequences.h"
 #include "store/data_store_handler.h"
 #include "util.h"
@@ -86,6 +90,35 @@ const auto NUM_VCPU = std::thread::hardware_concurrency();
 
 // Static mutex for protecting initialization state
 static std::mutex instance_mutex_;
+
+namespace
+{
+#ifdef ELOQ_MODULE_ENABLED
+/**
+ * @brief Starts brpc's bthread workers if none runs yet, by running one
+ * bthread to completion.
+ *
+ * With ELOQ_MODULE_ENABLED, EloqStore's shards run on the bthread workers as
+ * a brpc module, so a request to EloqStore completes only once workers exist.
+ * Attaching a data shard in cloud mode is such a request, made while the
+ * storage handler starts. A serving node has started the workers by then, its
+ * brpc servers and clients having run bthreads; a bootstrap may have started
+ * none, and would wait on the attach forever.
+ * @return true if the workers run.
+ */
+bool EnsureBthreadWorkers()
+{
+    bthread_t tid;
+    if (bthread_start_background(
+            &tid, nullptr, [](void *) -> void * { return nullptr; }, nullptr) !=
+        0)
+    {
+        return false;
+    }
+    return bthread_join(tid, nullptr) == 0;
+}
+#endif
+}  // namespace
 
 DataSubstrate &DataSubstrate::Instance()
 {
@@ -180,6 +213,25 @@ bool DataSubstrate::Start()
         LOG(ERROR) << "Failed to initialize metrics";
         return false;
     }
+#if (WITH_LOG_SERVICE)
+    // The log service started in phase 1, before the registry existed.
+    if (metrics::enable_metrics && metrics::enable_log_service_metrics &&
+        instance.log_server_ != nullptr)
+    {
+        instance.log_server_->EnableMetrics(instance.metrics_registry_.get(),
+                                            instance.tx_service_common_labels_);
+    }
+#endif
+
+#ifdef ELOQ_MODULE_ENABLED
+    // The storage handler's first EloqStore requests need running bthread
+    // workers (EnsureBthreadWorkers).
+    if (!EnsureBthreadWorkers())
+    {
+        LOG(ERROR) << "Failed to start the bthread workers";
+        return false;
+    }
+#endif
 
     // Phase 3: Initialize storage handler
     if (instance.GetCoreConfig().enable_data_store &&
@@ -816,6 +868,18 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
             ? FLAGS_enable_mvcc
             : config_reader.GetBoolean(
                   "local", "enable_mvcc", FLAGS_enable_mvcc);
+
+    // The shard cleaner's release threshold is a tx service gflag that the
+    // cleaner reads directly; the config file sets it unless the command line
+    // already did.
+    const char *field_release = "shard_clean_release_kb";
+    if (CheckCommandLineFlagIsDefault(field_release) &&
+        config_reader.HasValue("local", field_release))
+    {
+        GFLAGS_NAMESPACE::SetCommandLineOption(
+            field_release,
+            config_reader.Get("local", field_release, "").c_str());
+    }
 
     // Load network configuration
     if (!LoadNetworkConfig(core_config_.bootstrap,

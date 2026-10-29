@@ -510,7 +510,7 @@ struct FetchRecordFixture
         sharder.native_ng_ = 0;
         sharder.local_shards_ = &local_cc_shards;
         sharder.ng_leader_cache_[0].store(0, std::memory_order_relaxed);
-        sharder.ng_leader_term_cache_[0].store(-1, std::memory_order_relaxed);
+        sharder.ng_leader_term_cache_[0] = -1;
         sharder.leader_term_cache_[0].store(-1, std::memory_order_relaxed);
         sharder.candidate_leader_term_cache_[0].store(
             -1, std::memory_order_relaxed);

@@ -5,6 +5,7 @@
 #include <butil/endpoint.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -12,6 +13,15 @@
 
 #include "closure.h"
 #include "log_service.h"
+#include "log_service_metrics.h"
+
+DEFINE_uint32(cdc_scan_max_parked,
+              1024,
+              "Most CdcScan long polls a log group holds at once; beyond it a "
+              "scan with nothing to return is answered at once");
+DEFINE_uint32(cdc_scan_max_park_ms,
+              60000,
+              "Longest a CdcScan long poll is held, whatever its wait_ms asks");
 
 namespace txlog
 {
@@ -279,6 +289,18 @@ void LogInstance::RecoverTx(const RecoverTxRequest *request,
             log_state_->SearchTxDataMigrationOp(request->lock_tx_number());
     }
 
+    if (!has_multi_stage_log)
+    {
+        // A gate tx that logged holds the cluster config write lock until
+        // its coordinator's replay installs the gate and releases it.
+        // Clearing the lock on a node group that has not installed the gate
+        // yet would let that group admit DDL during a pause. The slot names
+        // only the latest gate tx, which is enough: a later one could not
+        // have logged while this tx's lock was still held anywhere.
+        has_multi_stage_log =
+            log_state_->SearchTxClusterGate(request->lock_tx_number());
+    }
+
     if (record == nullptr && !has_multi_stage_log)
     {
         // No log record found for the specified tx. The tx is deemed aborted.
@@ -349,6 +371,171 @@ void LogInstance::CheckMigrationIsFinished(
     response->set_finished(all_finished);
 }
 
+void LogInstance::EnableMetrics(metrics::MetricsRegistry *registry,
+                                const metrics::CommonLabels &node_labels)
+{
+    if (meter_ != nullptr)
+    {
+        return;
+    }
+    metrics::CommonLabels labels = node_labels;
+    labels["lg_id"] = std::to_string(log_group_id_);
+    auto meter = std::make_unique<metrics::Meter>(registry, labels);
+    meter->Register(metrics::NAME_CDC_ARRIVAL_COMPLETE_TS,
+                    metrics::Type::Gauge);
+    meter->Register(metrics::NAME_CDC_SCAN_PARKED_REQUESTS,
+                    metrics::Type::Gauge);
+    metrics::Meter *published = meter.get();
+    meter_ = std::move(meter);
+    published_meter_.store(published, std::memory_order_release);
+    // The group has been serving since before metrics existed: report where
+    // arrival_complete_ts already is, rather than 0 until its next advance.
+    ReportArrivalComplete();
+    cdc_long_poll_.SetSizeObserver(
+        [published](size_t parked)
+        {
+            published->Collect(metrics::NAME_CDC_SCAN_PARKED_REQUESTS,
+                               static_cast<double>(parked));
+        });
+}
+
+void LogInstance::ReportArrivalComplete()
+{
+    std::lock_guard<std::mutex> lk(arrival_metric_mutex_);
+    if (metrics::Meter *meter =
+            published_meter_.load(std::memory_order_acquire))
+    {
+        meter->Collect(metrics::NAME_CDC_ARRIVAL_COMPLETE_TS,
+                       static_cast<double>(arrival_complete_ts_.load(
+                           std::memory_order_acquire)));
+    }
+}
+
+void LogInstance::CdcScan(brpc::Controller *cntl,
+                          const CdcScanRequest *request,
+                          CdcScanResponse *response,
+                          google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    if (!ServeCdcScan(cntl, request, response) || request->wait_ms() == 0 ||
+        cdc_long_poll_.Size() >= FLAGS_cdc_scan_max_parked)
+    {
+        return;
+    }
+
+    // Nothing is emittable, and the caller may wait: hold the scan until
+    // something may have become emittable (cdc_long_poll.h). The completion
+    // runs once, on a bthread, and ends the call.
+    const uint64_t bound = response->arrival_complete_ts();
+    std::shared_ptr<CdcLongPoll::Request> parked = cdc_long_poll_.Prepare(
+        [this, cntl, request, response, done](CdcLongPoll::Wake why)
+        {
+            brpc::ClosureGuard done_guard(done);
+            switch (why)
+            {
+            case CdcLongPoll::Wake::kAdvance:
+            case CdcLongPoll::Wake::kDeadline:
+                response->Clear();
+                ServeCdcScan(cntl, request, response);
+                break;
+            case CdcLongPoll::Wake::kStop:
+                response->Clear();
+                response->set_status(CdcScanResponse::NotLeader);
+                response->set_redirect(LeaderAddress());
+                break;
+            case CdcLongPoll::Wake::kCancel:
+                // No one reads the answer; the empty page will do.
+                break;
+            }
+        });
+    done_guard.release();
+    // Before the park: once parked, the scan may complete and end the call at
+    // any moment, and the call must not be used after that.
+    cntl->NotifyOnCancel(brpc::NewCallback(&CdcLongPoll::Cancel, parked));
+    // Capped: the cancellation fires only when the connection breaks, not
+    // when the client gives up on the call, so an abandoned scan would hold
+    // its slot until the checkpoint next advances, however long it stalls.
+    cdc_long_poll_.Park(
+        parked, std::min(request->wait_ms(), FLAGS_cdc_scan_max_park_ms));
+
+    // A checkpoint applied, or a step-down, since the page was built found
+    // nothing parked to complete. Both update their state before they
+    // complete the parked scans, and the park took the same mutex after
+    // them, so these reads see their updates.
+    if (term_if_is_lg_leader_.load(butil::memory_order_acquire) < 0)
+    {
+        cdc_long_poll_.Complete(parked, CdcLongPoll::Wake::kStop);
+    }
+    else if (log_state_->MinCkptTs() > bound)
+    {
+        cdc_long_poll_.Complete(parked, CdcLongPoll::Wake::kAdvance);
+    }
+}
+
+bool LogInstance::ServeCdcScan(brpc::Controller *cntl,
+                               const CdcScanRequest *request,
+                               CdcScanResponse *response)
+{
+    // A read needs no raft round: a replica that still believes it leads
+    // but has been deposed serves only what it applied, and its own
+    // min_ckpt_ts_ bounds that view, so the page stays exact, merely older.
+    if (term_if_is_lg_leader_.load(butil::memory_order_acquire) < 0)
+    {
+        response->set_status(CdcScanResponse::NotLeader);
+        response->set_redirect(LeaderAddress());
+        return false;
+    }
+
+    std::string error;
+    switch (log_state_->CdcScan(*request, response, &error))
+    {
+    case CdcScanStatus::Ok:
+        response->set_status(CdcScanResponse::Success);
+        return response->data_size() == 0 && response->ddl_size() == 0 &&
+               !response->has_more();
+    case CdcScanStatus::NotReady:
+        LOG(INFO) << "CdcScan on log group " << log_group_id_
+                  << " is not ready: " << error;
+        response->Clear();
+        response->set_status(CdcScanResponse::NotLeader);
+        response->set_redirect(ip_ + ":" + std::to_string(port_));
+        break;
+    case CdcScanStatus::NotLeader:
+        // Leadership moved while the log state served the scan.
+        response->Clear();
+        response->set_status(CdcScanResponse::NotLeader);
+        response->set_redirect(LeaderAddress());
+        break;
+    case CdcScanStatus::Unsupported:
+        cntl->SetFailed(brpc::ENOMETHOD, "%s", error.c_str());
+        break;
+    case CdcScanStatus::InvalidArgument:
+        cntl->SetFailed(brpc::EREQUEST, "%s", error.c_str());
+        break;
+    case CdcScanStatus::StorageError:
+        LOG(ERROR) << "CdcScan on log group " << log_group_id_
+                   << " failed reading the log state: " << error;
+        cntl->SetFailed(brpc::EINTERNAL, "%s", error.c_str());
+        break;
+    }
+    return false;
+}
+
+std::string LogInstance::LeaderAddress() const
+{
+    const braft::PeerId leader = node_->leader_id();
+    if (leader.is_empty())
+    {
+        return {};
+    }
+    if (leader.type_ == braft::PeerId::Type::HostName)
+    {
+        return leader.hostname_addr.hostname + ":" +
+               std::to_string(leader.hostname_addr.port);
+    }
+    return butil::endpoint2str(leader.addr).c_str();
+}
+
 void LogInstance::CheckClusterScaleStatus(const LogRequest *request,
                                           LogResponse *response,
                                           google::protobuf::Closure *done)
@@ -405,6 +592,10 @@ bool LogInstance::BatchAddLogItems(
         }
     }
     log_state_->FlushLogItemBatch();
+    // Acknowledge only after the flush. CdcScan relies on it: a transaction
+    // keeps its write locks until its log write is acknowledged, so no
+    // checkpoint can cover a record before the record is readable here, and
+    // min_ckpt_ts_ never runs ahead of the stored data log.
     for (size_t i = 0; i < num; ++i)
     {
         LogStateAddLogItemTask task = write_log_tasks[i];
@@ -696,6 +887,13 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                         committed = (found && flushed_stage >= stage);
                         break;
                     }
+                    case LogContentMessage::ContentCase::kClusterGateLog:
+                    {
+                        // A gate entry is applied once: the slot holds its
+                        // transaction's value until a newer entry replaces it.
+                        committed = log_state_->SearchTxClusterGate(tx_number);
+                        break;
+                    }
                     default:
                         break;
                     }
@@ -775,6 +973,15 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                         req.txn_number(), timestamp, migration_tx_log_message);
                 break;
             }
+            case LogContentMessage::ContentCase::kClusterGateLog:
+            {
+                // Updates the gate slot, like UpdateCkptTs updates state; the
+                // entry itself is not retained.
+                log_state_->UpdateClusterGate(req.txn_number(),
+                                              timestamp,
+                                              log_content.cluster_gate_log());
+                break;
+            }
             default:
                 break;
             }
@@ -817,7 +1024,9 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                     log_content.content_case() ==
                         LogContentMessage::ContentCase::kClusterScaleLog ||
                     log_content.content_case() ==
-                        LogContentMessage::ContentCase::kMigrationLog)
+                        LogContentMessage::ContentCase::kMigrationLog ||
+                    log_content.content_case() ==
+                        LogContentMessage::ContentCase::kClusterGateLog)
                 {
                     // Pass all node group latest leader info to the multi-stage
                     // txn coordinator. So that the coordinator can send
@@ -909,11 +1118,27 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                 {
                     std::unique_ptr<LogShippingAgent> &curr_ship_agent =
                         it->second;
+                    // The old agent stops at its next message and closes its
+                    // stream, so the two overlap only briefly.
+                    const auto terminate_start =
+                        std::chrono::steady_clock::now();
                     curr_ship_agent->Terminate();
                     while (!curr_ship_agent->IsTerminated())
                     {
                         bthread_usleep(1000);
                     }
+                    LOG(INFO)
+                        << "Replaced the log shipping agent of cc node group "
+                        << cc_ng_id << " term "
+                        << curr_ship_agent->NodeGroupTerm() << " with one for "
+                        << "term " << cc_ng_term
+                        << "; the old agent stopped in "
+                        << std::chrono::duration_cast<
+                               std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() -
+                               terminate_start)
+                               .count()
+                        << " ms";
                 }
 
                 // The new log shipping agent spawns a background
@@ -978,7 +1203,18 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
 
             // log_state_->DeleteLogItems(node_id, timestamp);
 
+            const uint64_t arrival_complete_ts = log_state_->MinCkptTs();
             log_state_->UpdateCkptTs(node_group, timestamp);
+            // Only this advance can make a record emittable, so it completes
+            // the parked long polls, which then scan again.
+            const uint64_t advanced_to = log_state_->MinCkptTs();
+            if (advanced_to > arrival_complete_ts)
+            {
+                cdc_long_poll_.CompleteAll(CdcLongPoll::Wake::kAdvance);
+                arrival_complete_ts_.store(advanced_to,
+                                           std::memory_order_release);
+                ReportArrivalComplete();
+            }
         }
         if (response)
         {
@@ -1366,6 +1602,9 @@ void LogInstance::on_leader_stop(const butil::Status &status)
     std::unique_lock lk(log_replay_workers_mutex_);
 
     term_if_is_lg_leader_.store(-1, butil::memory_order_release);
+    // After the term is cleared: a scan parked later sees it and completes
+    // itself.
+    cdc_long_poll_.CompleteAll(CdcLongPoll::Wake::kStop);
     // clear log_replay_workers_, as new leader will reship on_leader_start
     log_replay_workers_.clear();
 

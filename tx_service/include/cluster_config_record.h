@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <unordered_set>
 
 #include "sharder.h"
@@ -32,15 +33,56 @@
 namespace txservice
 {
 
+/**
+ * @brief The cluster gate: a cluster-wide flag that, while paused, makes every
+ * new schema op fail with TxErrorCode::CLUSTER_GATED (EloqDoc
+ * docs/cdc-change-stream.md §6.2).
+ *
+ * CDC bootstrap pauses it so that no DDL runs while it copies the catalog. The
+ * cluster config cc map keeps the latest value in its single entry's payload,
+ * where each schema op's cluster config read lock reads it.
+ */
+struct ClusterGate
+{
+    /** @brief What a pause rejects. */
+    enum class Mode : uint8_t
+    {
+        kDdl = 0,     ///< New create, drop, truncate and index ops.
+        kDdlDml = 1,  ///< Also the first write of a transaction; reserved.
+    };
+
+    Mode mode{Mode::kDdl};  ///< What the gate rejects while paused.
+    bool paused{false};     ///< Whether the gate is closed.
+
+    /**
+     * @brief Compares two gates.
+     *
+     * @param rhs The other gate.
+     * @return true if both have the same mode and state.
+     */
+    bool operator==(const ClusterGate &rhs) const
+    {
+        return mode == rhs.mode && paused == rhs.paused;
+    }
+};
+
 struct ClusterConfigRecord : public TxRecord
 {
 public:
     ClusterConfigRecord() = default;
     ClusterConfigRecord(const ClusterConfigRecord &rhs)
-        : is_config_owner_(rhs.is_config_owner_), version_(rhs.version_)
+        : is_config_owner_(rhs.is_config_owner_),
+          version_(rhs.version_),
+          cluster_gate_(rhs.cluster_gate_)
     {
         if (rhs.is_config_owner_)
         {
+            // A deserialized record owns its configs, and may have none: a
+            // cluster gate's carries none.
+            if (rhs.node_group_configs_uptr_ == nullptr)
+            {
+                return;
+            }
             node_group_configs_uptr_ = std::make_unique<
                 std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
             for (const auto &pair : *rhs.node_group_configs_uptr_)
@@ -61,6 +103,7 @@ public:
             return *this;
         }
         version_ = rhs.version_;
+        cluster_gate_ = rhs.cluster_gate_;
         if (is_config_owner_ && node_group_configs_uptr_ != nullptr)
         {
             node_group_configs_uptr_.reset();
@@ -68,11 +111,14 @@ public:
         is_config_owner_ = rhs.is_config_owner_;
         if (rhs.is_config_owner_)
         {
-            node_group_configs_uptr_ = std::make_unique<
-                std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
-            for (const auto &pair : *rhs.node_group_configs_uptr_)
+            if (rhs.node_group_configs_uptr_ != nullptr)
             {
-                node_group_configs_uptr_->emplace(pair.first, pair.second);
+                node_group_configs_uptr_ = std::make_unique<
+                    std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
+                for (const auto &pair : *rhs.node_group_configs_uptr_)
+                {
+                    node_group_configs_uptr_->emplace(pair.first, pair.second);
+                }
             }
         }
         else
@@ -126,6 +172,16 @@ public:
             }
         }
         SerializeToStr(&version_, str);
+        // The gate goes last, behind its own has-bit, as the configs go behind
+        // has_ng_config.
+        bool has_gate = cluster_gate_.has_value();
+        SerializeToStr(&has_gate, str);
+        if (has_gate)
+        {
+            uint8_t mode = static_cast<uint8_t>(cluster_gate_->mode);
+            SerializeToStr(&mode, str);
+            SerializeToStr(&cluster_gate_->paused, str);
+        }
     }
 
     size_t SerializedLength() const override
@@ -156,6 +212,11 @@ public:
         }
 
         len += sizeof(uint64_t);
+        len += sizeof(bool);
+        if (cluster_gate_.has_value())
+        {
+            len += sizeof(uint8_t) + sizeof(bool);
+        }
         return len;
     }
 
@@ -195,12 +256,25 @@ public:
             }
         }
         DesrializeFrom(buf, offset, &version_);
+        bool has_gate;
+        DesrializeFrom(buf, offset, &has_gate);
+        cluster_gate_.reset();
+        if (has_gate)
+        {
+            uint8_t mode;
+            DesrializeFrom(buf, offset, &mode);
+            ClusterGate gate;
+            gate.mode = static_cast<ClusterGate::Mode>(mode);
+            DesrializeFrom(buf, offset, &gate.paused);
+            cluster_gate_ = gate;
+        }
     }
 
     TxRecord::Uptr Clone() const override
     {
         auto uptr = std::make_unique<ClusterConfigRecord>();
         uptr->version_ = version_;
+        uptr->cluster_gate_ = cluster_gate_;
         uptr->is_config_owner_ = true;
         const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
             *node_group_configs = nullptr;
@@ -239,14 +313,18 @@ public:
         const ClusterConfigRecord &rhs =
             dynamic_cast<const ClusterConfigRecord &>(record);
         version_ = rhs.version_;
+        cluster_gate_ = rhs.cluster_gate_;
         is_config_owner_ = rhs.is_config_owner_;
         if (rhs.is_config_owner_)
         {
-            node_group_configs_uptr_ = std::make_unique<
-                std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
-            for (auto &pair : *rhs.node_group_configs_uptr_)
+            if (rhs.node_group_configs_uptr_ != nullptr)
             {
-                node_group_configs_uptr_->emplace(pair.first, pair.second);
+                node_group_configs_uptr_ = std::make_unique<
+                    std::unordered_map<NodeGroupId, std::vector<NodeConfig>>>();
+                for (auto &pair : *rhs.node_group_configs_uptr_)
+                {
+                    node_group_configs_uptr_->emplace(pair.first, pair.second);
+                }
             }
         }
         else
@@ -310,6 +388,41 @@ public:
                                 : *node_group_configs_ptr_;
     }
 
+    /**
+     * @brief The cluster gate the record carries.
+     *
+     * Absent and present with paused = false are different values: the
+     * first says nothing, the second is a resume. A record carrying a gate
+     * carries no node group configs.
+     *
+     * @return The gate, or none.
+     */
+    const std::optional<ClusterGate> &GetClusterGate() const
+    {
+        return cluster_gate_;
+    }
+
+    /**
+     * @brief Sets the cluster gate the record carries.
+     *
+     * @param gate The gate.
+     */
+    void SetClusterGate(const ClusterGate &gate)
+    {
+        cluster_gate_ = gate;
+    }
+
+    /**
+     * @brief Whether the record carries a closed gate in mode kDdl or
+     * kDdlDml, which rejects new schema ops.
+     *
+     * @return true if a new schema op must fail with CLUSTER_GATED.
+     */
+    bool GatesSchemaOps() const
+    {
+        return cluster_gate_.has_value() && cluster_gate_->paused;
+    }
+
     void Reset()
     {
         if (is_config_owner_ && node_group_configs_uptr_)
@@ -319,6 +432,7 @@ public:
         is_config_owner_ = false;
         node_group_configs_ptr_ = nullptr;
         version_ = 0;
+        cluster_gate_.reset();
     }
 
 private:
@@ -336,5 +450,11 @@ private:
     };
     bool is_config_owner_{false};
     uint64_t version_{0};
+    /**
+     * The cluster gate: in the cluster config cc map's entry, the latest value
+     * a gate op installed; in a gate op's post write all, the value to
+     * install. Absent everywhere else.
+     */
+    std::optional<ClusterGate> cluster_gate_;
 };
 }  // namespace txservice

@@ -398,6 +398,31 @@ public:
     CatalogFactory() = default;
     virtual ~CatalogFactory() = default;
 
+    /**
+     * @brief Builds a table's schema object from its catalog image.
+     *
+     * An image records the version of each table it describes, the base table
+     * and every index. A table the image records no version for is one the
+     * image's DDL creates: the engine built the image before the DDL had a
+     * timestamp. The schema gives such a table @p version and keeps every
+     * table's version in its SchemaImage(), so the image it returns gives each
+     * table the same version whatever version it is loaded at.
+     *
+     * The data substrate relies on this. Once a schema op has chosen its
+     * prepare-stage timestamp D, SchemaOp::ResolveSchemaImages builds the new
+     * schema at D and keeps its image: the tables the op creates (every table
+     * of a CREATE TABLE, the new indexes of an add index) get D, and the
+     * tables that exist keep their versions. An engine must therefore record
+     * the version of every existing table in a DDL's new image, and no version
+     * for a table the DDL creates. TableKeySchemaTs::GetKeySchemaTs reads a
+     * missing version as 0, the unknown timestamp.
+     *
+     * @param table_name The base table.
+     * @param catalog_image The table's catalog image.
+     * @param version The schema's version, which is also the version of every
+     * table the image records none for.
+     * @return The schema.
+     */
     virtual TableSchema::uptr CreateTableSchema(
         const TableName &table_name,
         const std::string &catalog_image,

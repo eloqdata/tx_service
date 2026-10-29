@@ -437,7 +437,8 @@ CATCH_TEST_CASE(
                                 0,
                                 false,
                                 10,
-                                128 * 1024 * 1024);
+                                128 * 1024 * 1024,
+                                /*cdc_retention_seconds=*/0);
     CATCH_REQUIRE(instance.Start() == 0);
     braft::StateMachine &fsm = instance;
     for (int attempt = 0; attempt != 4; ++attempt)
@@ -506,7 +507,8 @@ CATCH_TEST_CASE(
             0,
             false,
             10,
-            128 * 1024 * 1024);
+            128 * 1024 * 1024,
+            /*cdc_retention_seconds=*/0);
     };
     auto instance = make_instance();
     CATCH_REQUIRE(instance->Start() == 0);
@@ -667,7 +669,8 @@ CATCH_TEST_CASE(
                                 0,
                                 false,
                                 10,
-                                128 * 1024 * 1024);
+                                128 * 1024 * 1024,
+                                /*cdc_retention_seconds=*/0);
     CATCH_REQUIRE(instance.Start() == 0);
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     while (!instance.is_leader() && std::chrono::steady_clock::now() < deadline)

@@ -17,7 +17,9 @@ The interface groups several durable responsibilities:
 
 - checkpoint writes and an optional explicit persistence barrier;
 - point reads, bucket reads, and ordered slice scans used on cache misses;
-- catalog, database, range, and statistics metadata;
+- catalog, database, range, and statistics metadata, including a table's kv
+  table without its catalog row (`CreateKvTable`, the counterpart of
+  `DropKvTable`, which an index build calls before its prepare log);
 - MVCC archive writes and historical-version reads;
 - leader/standby lifecycle hooks and storage snapshots; and
 - backend capability queries used to select shared-storage, copy, and cache
@@ -45,7 +47,18 @@ Startup selects one `DataStoreHandler` implementation at build time:
 
 The EloqStore engine is a separate submodule with its own architecture
 documentation. At this layer, only its `DataStore` adapter and the
-`DataStoreHandler`/EloqDSS integration contract are authoritative.
+`DataStoreHandler`/EloqDSS integration contract are authoritative. A node runs
+one EloqStore, owned by the factory and started with the first data store, and
+that store hosts every data shard the node leads: opening a data shard
+attaches it at its term (`EloqStore::AttachShard`) and closing it detaches it,
+while the other shards keep serving, so the node has one buffer pool, fd
+budget and cache quota however many node groups it leads. RocksDB backends
+give each data shard a database of its own, but EloqStore keeps every shard's
+partitions side by side, so each request names its data shard and the
+storage-wide sweeps (cloud prewarm, archives for backups and standby
+snapshots, branches, a global reopen) consult a filter for the partitions of
+that shard's buckets, set before every attach (`SetPartitionBuckets`);
+ordinary reads and writes do not.
 
 EloqDSS can run as a separate brpc service or be colocated with the tx service.
 The client resolves a KV partition to a DSS shard and current owner. A colocated
@@ -62,9 +75,27 @@ ownership of the closure until the operation reaches terminal completion.
 
 `DataStoreService` gates requests by per-shard ownership and lifecycle state.
 Reads require an open readable shard; writes require the current writable
-owner. When a client reaches a former owner, the response carries newer
-sharding information so the client can refresh its versioned routing view and
-retry within the operation's bounded retry policy.
+owner. A request that finds its shard `Starting`, opening or closing as its
+node's leadership changes, waits on the shard's waiting list and runs again
+once the shard leaves `Starting`. When a client reaches a former owner, the
+response carries newer sharding information so the client can refresh its
+versioned routing view and retry within the operation's bounded retry policy.
+
+After a failed RPC the client sends the request again at once only if that can
+reach the shard: the shard is now local, or the channel to its current owner is
+healthy (`CanRetryShardNow`). brpc keeps a failed socket down until its health
+check reconnects, so an immediate retry to the same address would only fail
+again; the operation fails instead and its caller's retry policy applies.
+
+With data shards bound to NGs (EloqDSS colocated with the tx service, shard *g*
+for NG *g*), the node hosting a shard is the NG's leader. Every node reaches
+other NGs' shards directly for shared metadata and checkpoint flushes, so each
+node points a shard at its NG's leader whenever the tx service learns a newer
+leader term (`DataStoreHandler::OnLeaderChanged`), even for the same node. The
+shard's version in this mode is that term: every node derives the same number
+for the same leadership, so a redirect's version compares with this node's. A
+move whose term is below the shard's version changes nothing, checked against
+the routing slot it replaces, so moves and redirects may arrive in any order.
 
 For shared-storage backends, DSS shard migration transfers serving ownership
 rather than copying the underlying dataset: the source stops accepting writes,
@@ -134,6 +165,8 @@ term writable again.
   does not reject reads.
 - Local EloqDSS bypass and remote RPC implement the same request semantics.
 - Shard ownership and topology versions fence writes to a moved DSS shard.
+- With data shards bound to NGs, a shard's routing version never falls below
+  the newest leader term its node has learned.
 - The partitioning-kind flag is part of routing correctness, not a storage
   optimization hint.
 
@@ -146,6 +179,9 @@ term writable again.
 | EloqDSS client routing supports local service bypass and remote RPC completion | `store_handler/data_store_service_client.h`; `store_handler/data_store_service_client.cpp`; `store_handler/data_store_service_client_closure.h`; `store_handler/data_store_service_client_closure.cpp` |
 | Read closures retain values through callbacks and release unconsumed buffers before pool reuse | `store_handler/data_store_service_client_closure.h`; `store_handler/eloq_data_store_service/object_pool.h`; `tx_service/tests/ReadClosureLifetime-Test.cpp` |
 | EloqDSS owns versioned data shards behind a pluggable `DataStore` interface | `store_handler/eloq_data_store_service/data_store_service.h`; `store_handler/eloq_data_store_service/data_store_service.cpp`; `store_handler/eloq_data_store_service/data_store.h`; `store_handler/eloq_data_store_service/ds_request.proto` |
+| Requests for a `Starting` shard wait on its waiting list | `store_handler/eloq_data_store_service/data_store_service.h`; `store_handler/eloq_data_store_service/data_store_service.cpp` |
+| The client retries at once only when the shard is reachable, and binds data shards to NG leaders by term | `store_handler/data_store_service_client.h`; `store_handler/data_store_service_client.cpp`; `store_handler/data_store_service_client_closure.h`; `store_handler/eloq_data_store_service/data_store_service_config.cpp` |
+| One EloqStore hosts every data shard the node leads, and sweeps only the partitions of the shard a request names | `store_handler/eloq_data_store_service/eloq_store_data_store_factory.h`; `store_handler/eloq_data_store_service/eloq_store_data_store.h`; `store_handler/eloq_data_store_service/eloq_store_data_store.cpp`; `store_handler/eloq_data_store_service/data_store.h` |
 | Embedded RocksDB implements the same handler contract without DSS transport | `store_handler/rocksdb_handler.h`; `store_handler/rocksdb_handler.cpp` |
 | Checkpoint data sync depends on `PutAll` and the optional persistence barrier | `tx_service/src/cc/local_cc_shards.cpp`; `tx_service/include/data_sync_task.h`; `tx_service/src/data_sync_task.cpp`; `tx_service/src/checkpointer.cpp` |
 | Cache-miss requests are coalesced, retained across retry, and safely recycled or destroyed | `tx_service/include/cc/cc_req_misc.h`; `tx_service/src/cc/cc_req_misc.cpp`; `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp` |

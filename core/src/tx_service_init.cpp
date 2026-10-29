@@ -7,7 +7,18 @@
 #include "eloq_log_wrapper.h"
 #include "sequences/sequences.h"
 #include "tx_service.h"
-DEFINE_int32(checkpointer_interval, 10, "Checkpointer interval in seconds");
+DEFINE_int32(checkpointer_interval,
+             10,
+             "Checkpointer interval in seconds; values below 5 are raised to "
+             "5, negative values are rejected");
+
+/**
+ * @brief The shortest checkpointer interval, in seconds.
+ *
+ * A shorter configured interval is raised to this. A zero interval would run
+ * checkpoint rounds back to back.
+ */
+static constexpr int64_t kMinCheckpointerIntervalSec = 5;
 DEFINE_int32(checkpointer_min_ckpt_request_interval,
              5,
              "Minimum checkpoint request interval in seconds, to avoid too "
@@ -42,6 +53,11 @@ DEFINE_string(hm_bin_path,
 DEFINE_uint32(deadlock_check_interval_seconds,
               10,
               "Deadlock check interval in seconds");
+DEFINE_int32(ddl_kv_retry_interval_seconds,
+             30,
+             "Pause in seconds before a schema op runs a failed data store "
+             "step again after its point of no return; 0 is raised to 1, "
+             "negative values are rejected");
 DEFINE_bool(realtime_sampling,
             true,
             "Whether enable realtime sampling. If disable it, user may need "
@@ -65,12 +81,28 @@ DEFINE_uint64(dirty_memory_size_threshold_mb,
 
 bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 {
-    uint64_t checkpointer_interval =
+    // Read signed: a negative value stored as unsigned becomes an interval of
+    // about 136 years, which silently stops the periodic checkpoints.
+    int64_t checkpointer_interval =
         !CheckCommandLineFlagIsDefault("checkpointer_interval")
             ? FLAGS_checkpointer_interval
             : config_reader.GetInteger("local",
                                        "checkpointer_interval",
                                        FLAGS_checkpointer_interval);
+    if (checkpointer_interval < 0)
+    {
+        LOG(ERROR) << "Invalid `checkpointer_interval` "
+                   << checkpointer_interval << ": it must not be negative";
+        return false;
+    }
+    if (checkpointer_interval < kMinCheckpointerIntervalSec)
+    {
+        LOG(WARNING) << "`checkpointer_interval` " << checkpointer_interval
+                     << " is below the minimum of "
+                     << kMinCheckpointerIntervalSec << " seconds; using "
+                     << kMinCheckpointerIntervalSec;
+        checkpointer_interval = kMinCheckpointerIntervalSec;
+    }
 
     uint64_t checkpointer_delay_seconds =
         !CheckCommandLineFlagIsDefault("checkpointer_delay_seconds")
@@ -143,6 +175,31 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
                                        "deadlock_check_interval_seconds",
                                        FLAGS_deadlock_check_interval_seconds);
     txservice::DeadLockCheck::SetTimeInterval(deadlock_check_interval_seconds);
+
+    // Read signed, as checkpointer_interval is: a negative value stored as
+    // unsigned would stall a retrying schema op for decades.
+    int64_t ddl_kv_retry_interval_seconds =
+        !CheckCommandLineFlagIsDefault("ddl_kv_retry_interval_seconds")
+            ? FLAGS_ddl_kv_retry_interval_seconds
+            : config_reader.GetInteger("local",
+                                       "ddl_kv_retry_interval_seconds",
+                                       FLAGS_ddl_kv_retry_interval_seconds);
+    if (ddl_kv_retry_interval_seconds < 0)
+    {
+        LOG(ERROR) << "Invalid `ddl_kv_retry_interval_seconds` "
+                   << ddl_kv_retry_interval_seconds
+                   << ": it must not be negative";
+        return false;
+    }
+    if (ddl_kv_retry_interval_seconds == 0)
+    {
+        // Retries need a pause between them.
+        LOG(WARNING) << "`ddl_kv_retry_interval_seconds` 0 is below the "
+                        "minimum of 1 second; using 1";
+        ddl_kv_retry_interval_seconds = 1;
+    }
+    txservice::SchemaOp::SetKvRetryInterval(
+        std::chrono::seconds(ddl_kv_retry_interval_seconds));
 
     bool realtime_sampling =
         !CheckCommandLineFlagIsDefault("realtime_sampling")

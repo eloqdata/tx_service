@@ -82,6 +82,9 @@ set(CATCH_MAIN_TESTS
     ApplyResponseBoundary-Test
     RemoteUploadTxCommands-Test
     TransactionImageLifetime-Test
+    CkptLockRegistry-Test
+    ClusterGate-Test
+    LogAgentCdc-Test
 )
 
 if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR
@@ -134,6 +137,19 @@ set_property(TARGET RangeScanMemory-Test PROPERTY CXX_EXTENSIONS OFF)
 add_test(NAME RangeScanMemory-Test COMMAND RangeScanMemory-Test)
 set_tests_properties(RangeScanMemory-Test PROPERTIES
     LABELS "RangeScanMemory-Test" TIMEOUT 90)
+
+# --- Log service unit tests ---
+# Their sources live beside the log service they test; they need only the
+# logservice library, not the tx-service harness.
+set(LOG_SERVICE_TESTS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../eloq_log_service/test)
+foreach(name CdcScan-Test CdcLongPoll-Test LogStateSchemaOp-Test
+             LogStateClusterGate-Test)
+    add_executable(${name} ${LOG_SERVICE_TESTS_DIR}/${name}.cpp)
+    target_link_libraries(${name} PRIVATE logservice Catch2::Catch2WithMain)
+    set_property(TARGET ${name} PROPERTY CXX_STANDARD 20)
+    set_property(TARGET ${name} PROPERTY CXX_EXTENSIONS OFF)
+    catch_discover_tests(${name} PROPERTIES LABELS "${name}")
+endforeach()
 
 # --- Phase 2 cross-NG cluster test (own main; links cluster_harness) ---
 # Drives a real 2-node out-of-process cluster, so it links cluster_harness (the

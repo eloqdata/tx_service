@@ -171,27 +171,59 @@ public:
         std::string tag;
     };
 
+    /**
+     * @brief Makes the data shard's data store on the factory's store, which
+     * must be running (EloqStoreDataStoreFactory::CreateDataStore).
+     * @param shard_id The data shard.
+     * @param data_store_service The service, which holds the factory.
+     */
     EloqStoreDataStore(uint32_t shard_id, DataStoreService *data_store_service);
 
-    ~EloqStoreDataStore() override = default;
+    ~EloqStoreDataStore() override;
 
     bool Initialize() override;
 
+    /**
+     * @brief Attaches the data shard to the store at its term
+     * (EloqStore::AttachShard): its partitions are served in that term from
+     * now on, in cloud mode after the shard's term file has been raised.
+     *
+     * @param term The data shard's term.
+     * @param data_shard_id The data shard, the store's data store shard id.
+     * @return Whether the shard is attached; false on ExpiredTerm, when a
+     * newer term owns the shard.
+     */
     bool StartDB(int64_t term, uint32_t data_shard_id) override
     {
-        ::eloqstore::KvError res =
-            eloq_store_service_->Start(branch_name_, term, data_shard_id);
+        LOG(INFO) << "Attaching data shard " << data_shard_id
+                  << " to the EloqStore at term " << term << ", owning "
+                  << partition_buckets_.size()
+                  << " buckets (0: every partition)";
+        ::eloqstore::KvError res = store_->AttachShard(data_shard_id, term);
         if (res != ::eloqstore::KvError::NoError)
         {
-            LOG(ERROR) << "EloqStore start failed with error code: "
+            LOG(ERROR) << "Attaching data shard " << data_shard_id
+                       << " to the EloqStore failed with error code: "
                        << static_cast<uint32_t>(res);
         }
         return res == ::eloqstore::KvError::NoError;
     }
 
+    /**
+     * @brief Detaches the data shard from the store (EloqStore::DetachShard):
+     * its requests are refused, the ones in flight finish, and the store
+     * drops what it holds for its partitions. The store itself keeps running
+     * for the other data shards.
+     */
     void Shutdown() override
     {
-        eloq_store_service_->Stop();
+        ::eloqstore::KvError res = store_->DetachShard(shard_id_);
+        if (res != ::eloqstore::KvError::NoError)
+        {
+            LOG(ERROR) << "Detaching data shard " << shard_id_
+                       << " from the EloqStore failed with error code: "
+                       << static_cast<uint32_t>(res);
+        }
     }
 
     /**
@@ -259,6 +291,26 @@ public:
      */
     void SwitchToReadWrite() override;
 
+    /**
+     * @brief Sets the buckets of this data shard, which the store's partition
+     * filter checks for it (OwnsPartition).
+     *
+     * Every data shard's partitions share the store's storage: one cloud
+     * store path for the cluster, and in local mode one store path per node.
+     * So the operations that sweep it for a data shard (prewarm, archives for
+     * backups and standby snapshots, branches, reopen) must pick that shard's
+     * partitions. The set belongs to the data shard, not the process: the one
+     * store hosts a shard for each node group the node leads.
+     *
+     * @param bucket_ids The data shard's buckets; empty accepts every
+     * partition.
+     * @warning Call only while the data shard is detached (Starting, before
+     * StartDB), since the store reads the set without a lock once the shard
+     * is attached.
+     */
+    void SetPartitionBuckets(
+        const std::unordered_set<uint16_t> &bucket_ids) override;
+
     void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) override;
     bool CreateSnapshotForStandby(uint32_t ng_id, std::string_view tag);
     void DeleteStandbySnapshot(uint64_t term, std::string_view tag) override;
@@ -286,10 +338,36 @@ private:
     void ScanDelete(DeleteRangeRequest *delete_range_req);
     void Floor(ScanRequest *scan_req);
 
-    std::unique_ptr<::eloqstore::EloqStore> eloq_store_service_{nullptr};
+    /**
+     * @brief Whether a partition belongs to this data shard; the store's
+     * partition filter asks the factory, which asks the shard's data store.
+     *
+     * Maps the partition to its bucket as the tx service does
+     * (Sharder::MapRangeIdToBucketId for range-partitioned tables, the hash
+     * partition itself for hash-partitioned ones) and looks the bucket up in
+     * partition_buckets_.
+     *
+     * @param table_ident The partition.
+     * @return true if it belongs to this data shard, or if no buckets are set.
+     */
+    bool OwnsPartition(const ::eloqstore::TableIdent &table_ident) const;
 
-    // Branch name passed to EloqStore::Start().  Populated from the factory
-    // config in the EloqStoreDataStore constructor.
-    std::string branch_name_{"main"};
+    /**
+     * @brief Buckets of this data shard (SetPartitionBuckets); empty accepts
+     * every partition.
+     *
+     * Written only while the data shard is detached and read by the store
+     * through its partition filter while it is attached, so it needs no lock.
+     */
+    std::unordered_set<uint16_t> partition_buckets_;
+
+    /**
+     * The store every data shard's data store shares, owned by the factory,
+     * which outlives this object's use of it (DataStoreService shuts the
+     * data shards down before it destroys the factory).
+     */
+    ::eloqstore::EloqStore *store_{nullptr};
+
+    friend class EloqStoreDataStoreFactory;
 };
 }  // namespace EloqDS

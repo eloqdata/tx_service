@@ -30,6 +30,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -51,6 +52,7 @@
 #include "tx_request.h"
 #include "tx_service.h"
 #include "tx_service_common.h"
+#include "tx_service_metrics.h"
 #include "tx_trace.h"
 #include "tx_util.h"
 #include "tx_worker_pool.h"
@@ -143,8 +145,13 @@ void ReadOperation::Forward(TransactionExecution *txm)
     {
         if (!read_tx_req_->read_local_)
         {
-            // Just returned from lock_bucket_op_, check lock_bucket_result_.
-            assert(lock_range_bucket_result_->IsFinished());
+            // Back from lock_range_op_ or lock_bucket_op_, or from the wait
+            // before a retry (ReRunOp). A hash-partitioned key whose bucket
+            // was already known (FastToGetBucket) runs no lock op, so a retry
+            // of its read finds the lock result still reset: neither finished
+            // nor errored, and Process() looks the bucket up again.
+            assert(lock_range_bucket_result_->IsFinished() ||
+                   read_tx_req_->tab_name_->IsHashPartitioned());
             if (lock_range_bucket_result_->IsError())
             {
                 // There is an error when getting the input key's bucket or
@@ -287,6 +294,7 @@ void ReadLocalOperation::Reset()
     rec_ = nullptr;
     hd_result_ = nullptr;
     execute_immediately_ = true;
+    is_for_write_ = false;
 }
 
 void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
@@ -2363,11 +2371,13 @@ SchemaOp::SchemaOp(const std::string_view table_name_sv,
                    const std::string &current_image,
                    const std::string &dirty_image,
                    uint64_t schema_ts,
-                   OperationType op_type)
+                   OperationType op_type,
+                   TransactionExecution *txm)
     : table_key_(TableName(table_name_sv.data(),
                            table_name_sv.size(),
                            TableType::Primary,
-                           table_engine))
+                           table_engine)),
+      kv_retry_wait_op_(txm)
 {
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
@@ -2375,6 +2385,102 @@ SchemaOp::SchemaOp(const std::string_view table_name_sv,
     dirty_image_str_ = dirty_image;
     curr_schema_ts_ = schema_ts;
     op_type_ = op_type;
+}
+
+void SchemaOp::StartKvStep(TransactionExecution *txm, DsUpsertTableOp &step)
+{
+    txm->PushOperation(&step, 0);
+    txm->Process(step);
+}
+
+void SchemaOp::ArmKvRetryWait(TransactionExecution *txm,
+                              TransactionOperation *step,
+                              std::string_view step_name,
+                              const std::string &error)
+{
+    if (step != kv_retry_step_)
+    {
+        kv_retry_step_ = step;
+        kv_retry_failures_ = 0;
+    }
+    ++kv_retry_failures_;
+    const std::chrono::seconds interval = KvRetryInterval();
+    LOG(WARNING) << "Schema op on table " << table_key_.Name().StringView()
+                 << ": the data store failed the " << step_name << " (attempt "
+                 << kv_retry_failures_ << ", error: " << error
+                 << "); retrying in " << interval.count()
+                 << " s while holding the table's catalog lock, txn: "
+                 << txm->TxNumber();
+    kv_retry_wait_op_.SetBlockingWork(
+        [interval]()
+        {
+            std::this_thread::sleep_for(interval);
+            return CcErrorCode::NO_ERROR;
+        });
+}
+
+void SchemaOp::RunKvStepAgain(TransactionExecution *txm)
+{
+    assert(kv_retry_step_ != nullptr);
+    // The step is not running, so the tx processes it as soon as it is on top
+    // of the stack; retry count 0 keeps a DsUpsertTableOp to one attempt.
+    txm->PushOperation(kv_retry_step_, 0);
+}
+
+void SchemaOp::ResetKvRetry(TransactionExecution *txm)
+{
+    kv_retry_wait_op_.Reset();
+    kv_retry_wait_op_.ResetHandlerTxm(txm);
+    kv_retry_step_ = nullptr;
+    kv_retry_failures_ = 0;
+}
+
+void SchemaOp::StartUnlockClusterConfig(TransactionExecution *txm,
+                                        PostReadOperation &unlock_op)
+{
+    // Get cce addr of cluster config read lock from rset.
+    const CcEntryAddr *cluster_config_addr = nullptr;
+    const ReadSetEntry *cluster_config_entry = nullptr;
+    for (const auto &[cce_addr, read_entry_pair] :
+         txm->rw_set_.MetaDataReadSet())
+    {
+        if (read_entry_pair.second == cluster_config_ccm_name_sv)
+        {
+            cluster_config_addr = &cce_addr;
+            cluster_config_entry = &read_entry_pair.first;
+            break;
+        }
+    }
+    assert(cluster_config_addr && cluster_config_entry);
+    unlock_op.Reset(cluster_config_addr, cluster_config_entry);
+    txm->PushOperation(&unlock_op);
+    txm->Process(unlock_op);
+}
+
+void SchemaOp::ResolveSchemaImages(uint64_t dirty_version)
+{
+    LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+    const TableName &table_name = table_key_.Name();
+    if (!image_str_.empty())
+    {
+        TableSchema::uptr current = shards->CreateTableSchemaFromImage(
+            table_name, image_str_, curr_schema_ts_);
+        if (current != nullptr)
+        {
+            image_str_ = current->SchemaImage();
+        }
+    }
+    if (!dirty_image_str_.empty())
+    {
+        TableSchema::uptr dirty = shards->CreateTableSchemaFromImage(
+            table_name, dirty_image_str_, dirty_version);
+        if (dirty != nullptr)
+        {
+            dirty_image_str_ = dirty->SchemaImage();
+        }
+    }
+    catalog_rec_.SetSchemaImage(image_str_);
+    catalog_rec_.SetDirtySchemaImage(dirty_image_str_);
 }
 
 void SchemaOp::FillPrepareLogRequestCommon(TransactionExecution *txm,
@@ -2461,1104 +2567,6 @@ void SchemaOp::FillCleanLogRequestCommon(TransactionExecution *txm,
         ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     clean_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
     clean_log_rec->mutable_node_terms()->clear();
-}
-
-UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
-                             TableEngine table_engine,
-                             const std::string &current_image,
-                             uint64_t curr_schema_ts,
-                             const std::string &dirty_image,
-                             OperationType op_type,
-                             TransactionExecution *txm)
-    : SchemaOp(table_name_str,
-               table_engine,
-               current_image,
-               dirty_image,
-               curr_schema_ts,
-               op_type),
-      lock_cluster_config_op_(),
-      acquire_all_intent_op_(txm),
-      prepare_log_op_(txm),
-      post_all_intent_op_(txm),
-      unlock_cluster_config_op_(txm),
-      upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
-      update_sequence_table_op_(txm),
-      acquire_all_lock_op_(txm),
-      commit_log_op_(txm),
-      clean_ccm_op_(txm),
-      post_all_lock_op_(txm),
-      clean_log_op_(txm),
-      read_cluster_result_(txm)
-{
-    assert(op_type_ == OperationType::CreateTable ||
-           op_type_ == OperationType::DropTable ||
-           op_type_ == OperationType::TruncateTable ||
-           op_type_ == OperationType::Update);
-
-    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
-                                                    TableType::ClusterConfig,
-                                                    TableEngine::None);
-    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
-    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
-
-    acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_intent_op_.keys_.emplace_back(&table_key_);
-    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
-    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
-
-    post_all_intent_op_.table_name_ = &catalog_ccm_name;
-    post_all_intent_op_.keys_.emplace_back(&table_key_);
-    post_all_intent_op_.recs_.push_back(&catalog_rec_);
-    post_all_intent_op_.op_type_ = op_type_;
-    post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
-
-    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_lock_op_.keys_.emplace_back(&table_key_);
-    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
-    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
-
-    post_all_lock_op_.table_name_ = &catalog_ccm_name;
-    post_all_lock_op_.keys_.emplace_back(&table_key_);
-    post_all_lock_op_.recs_.push_back(&catalog_rec_);
-    post_all_lock_op_.op_type_ = op_type_;
-    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
-
-    clean_ccm_op_.Clear();
-
-    TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
-    TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
-    TX_TRACE_ASSOCIATE(this, &post_all_intent_op_, "post_all_intent_op_");
-    TX_TRACE_ASSOCIATE(this, &upsert_kv_table_op_, "upsert_kv_table_op_");
-    TX_TRACE_ASSOCIATE(
-        this, &update_sequence_table_op_, "update_sequence_table_op_");
-    TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
-    TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
-    TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
-    TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
-
-    is_force_finished = false;
-}
-
-void UpsertTableOp::Forward(TransactionExecution *txm)
-{
-    if (op_ == nullptr)
-    {
-        op_ = &lock_cluster_config_op_;
-        txm->PushOperation(&lock_cluster_config_op_);
-        txm->Process(lock_cluster_config_op_);
-    }
-    else if (op_ == &lock_cluster_config_op_)
-    {
-        if (lock_cluster_config_op_.hd_result_->IsError())
-        {
-            LOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
-                       << txm->TxNumber();
-            if (!prepare_log_op_.hd_result_.IsFinished())
-            {
-                txm->commit_ts_ = tx_op_failed_ts_;
-            }
-            ForceToFinish(txm);
-            return;
-        }
-
-        if (prepare_log_op_.hd_result_.IsFinished())
-        {
-            assert(op_type_ == OperationType::CreateTable ||
-                   op_type_ == OperationType::Update);
-            op_ = &acquire_all_lock_op_;
-            txm->PushOperation(&acquire_all_lock_op_);
-            txm->Process(acquire_all_lock_op_);
-        }
-        else
-        {
-            op_ = &acquire_all_intent_op_;
-            txm->PushOperation(&acquire_all_intent_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process acquire_all_intent_op_";
-            txm->Process(acquire_all_intent_op_);
-        }
-    }
-    else if (op_ == &acquire_all_intent_op_)
-    {
-        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
-            0)
-        {
-            LOG(ERROR) << "Upsert table acquire write intent failed, tx_number:"
-                       << txm->TxNumber();
-            txm->upsert_resp_->SetErrorCode(
-                TxErrorCode::UPSERT_TABLE_ACQUIRE_WRITE_INTENT_FAIL);
-            // Fails to acquire the write intent on the schema. Since write
-            // intents only conflict with other writes, there must be
-            // another tx trying to modify the same table's schema. Stops
-            // the schema operation. Set the commit ts to 0 to signal that
-            // the following post write operation releases all write
-            // intents.
-            txm->commit_ts_ = tx_op_failed_ts_;
-            // Moves to the last operation that removes all write
-            // intents/locks.
-            op_ = &post_all_lock_op_;
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
-            return;
-        }
-
-        // Assigns a commit timestamp to the tx state machine as the version
-        // of the new schema. Unlike the conventional commit ts, the
-        // schema's commit ts is not chosen via the SetTs stage. But it
-        // follows a similar set of rules: the new schema's version should
-        // be greater than 1) the current version, 2) the maximal commit ts
-        // of all tx's that have read the schema, and 3) the local time when
-        // the tx starts.
-        txm->commit_ts_ = txm->commit_ts_bound_ + 1;
-
-        for (size_t idx = 0; idx < acquire_all_intent_op_.upload_cnt_; ++idx)
-        {
-            const AcquireAllResult &acq_all_res =
-                acquire_all_intent_op_.hd_results_[idx].Value();
-            uint64_t ts = std::max(acq_all_res.commit_ts_ + 1,
-                                   acq_all_res.last_vali_ts_ + 1);
-            txm->commit_ts_ = std::max(txm->commit_ts_, ts);
-        }
-
-        op_ = &prepare_log_op_;
-        FillPrepareLogRequest(txm);
-        txm->PushOperation(&prepare_log_op_);
-        CODE_FAULT_INJECTOR("upsert_table_prepare_log_fail", {
-            LOG(INFO) << "FaultInject  upsert_table_prepare_log_fail";
-            prepare_log_op_.is_running_ = true;
-            prepare_log_op_.hd_result_.SetError(CcErrorCode::WRITE_LOG_FAILED);
-            return;
-        });
-        DLOG(INFO) << "txn: " << txm->TxNumber() << " process prepare_log_op_";
-        txm->Process(prepare_log_op_);
-    }
-    else if (op_ == &prepare_log_op_)
-    {
-        if (prepare_log_op_.hd_result_.IsError())
-        {
-            if (prepare_log_op_.hd_result_.ErrorCode() ==
-                CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR)
-            {
-                // prepare log result unknown, keep retrying until getting a
-                // clear response, either success or failure, or the
-                // coordinator itself is no longer leader
-                if (txm->CheckLeaderTerm())
-                {
-                    LOG(WARNING)
-                        << "Upsert table write prepare log result unknown, "
-                           "tx_number:"
-                        << txm->TxNumber() << ", keep retrying";
-                    // set retry flag and retry prepare log
-                    ::txlog::WriteLogRequest *log_req =
-                        prepare_log_op_.log_closure_.LogRequest()
-                            .mutable_write_log_request();
-                    log_req->set_retry(true);
-                    txm->PushOperation(&prepare_log_op_);
-                    txm->Process(prepare_log_op_);
-                }
-                else
-                {
-                    LOG(ERROR) << "Upsert table write prepare log result "
-                                  "unknown, tx_number:"
-                               << txm->TxNumber()
-                               << ", not leader any more, stop retrying";
-                    // Not leader anymore, just quit. New leader will know
-                    // whether prepare log succeeds and continue the rest if
-                    // it does. Should not release the write intents. If
-                    // prepare log is not written, the write intents will be
-                    // released individually via orphan lock recovery
-                    // mechanism.
-                    txm->upsert_resp_->SetErrorCode(
-                        TxErrorCode::LOG_SERVICE_UNREACHABLE);
-
-                    txm->upsert_resp_->Finish(UpsertResult::Failed);
-                    txm->state_stack_.pop_back();
-                    assert(txm->state_stack_.empty());
-                    LocalCcShards *local_shards =
-                        Sharder::Instance().GetLocalCcShards();
-                    std::unique_lock<std::mutex> lk(
-                        local_shards->table_schema_op_pool_mux_);
-                    local_shards->table_schema_op_pool_.emplace_back(
-                        std::move(txm->schema_op_));
-                }
-            }
-            else
-            {
-                LOG(ERROR)
-                    << "Upsert table write prepare log failed, tx_number:"
-                    << txm->TxNumber();
-                // Fails to flush the prepare log. The schema operation is
-                // considered failed if the prepare log is not flushed. The
-                // commit ts is set to 0 to signal that the following post
-                // write operation releases all write intents.
-                txm->commit_ts_ = tx_op_failed_ts_;
-                // Moves to the last operation that removes all write
-                // intents/locks.
-                op_ = &post_all_lock_op_;
-
-                txm->upsert_resp_->SetErrorCode(
-                    TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
-
-                txm->PushOperation(&post_all_lock_op_);
-                txm->Process(post_all_lock_op_);
-            }
-        }
-        else
-        {
-            ACTION_FAULT_INJECTOR("upsert_table_crash_after_prepare_log");
-            op_ = &post_all_intent_op_;
-
-            txm->PushOperation(&post_all_intent_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process post_all_intent_op_";
-            txm->Process(post_all_intent_op_);
-        }
-    }
-    else if (op_ == &post_all_intent_op_)
-    {
-        if (post_all_intent_op_.IsFailed())
-        {
-            // After the prepare log is flushed, the schema op is guaranteed
-            // to proceed. Retry this step to install the dirty schema in the tx
-            // service, if the tx node is still the leader. The tx is also
-            // allowed to proceed if the tx is in the recovery mode and the tx
-            // node is a leader candidate.
-
-            if (txm->CheckLeaderTerm())
-            {
-                // set catalog_rec_'s binary_value_ to image_str since it
-                // could be set to TableSchemaView pointer in localshard.
-                catalog_rec_.SetSchemaImage(image_str_);
-
-                txm->PushOperation(&post_all_intent_op_);
-                DLOG(INFO) << "txn: " << txm->TxNumber()
-                           << " process post_all_intent_op_";
-                txm->Process(post_all_intent_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-        }
-        else if (op_type_ == OperationType::DropTable ||
-                 op_type_ == OperationType::TruncateTable)
-        {
-            // For DROP TABLE and TRUNCATE TABLE operations, the data store
-            // operation of deleting the k-v table happens after the commit log
-            // is flushed.
-            op_ = &acquire_all_lock_op_;
-            txm->PushOperation(&acquire_all_lock_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process acquire_all_lock_op_";
-            txm->Process(acquire_all_lock_op_);
-        }
-        else
-        {
-            // Release cluster config op before doing data store op.
-            op_ = &unlock_cluster_config_op_;
-            // Get cce addr of cluster config read lock from rset.
-            const CcEntryAddr *cluster_config_addr = nullptr;
-            const ReadSetEntry *cluster_config_entry = nullptr;
-            const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
-            for (const auto &[cce_addr, read_entry_pair] : meta_rset)
-            {
-                if (read_entry_pair.second == cluster_config_ccm_name_sv)
-                {
-                    cluster_config_addr = &cce_addr;
-                    cluster_config_entry = &read_entry_pair.first;
-                    break;
-                }
-            }
-            assert(cluster_config_addr && cluster_config_entry);
-            unlock_cluster_config_op_.Reset(cluster_config_addr,
-                                            cluster_config_entry);
-            txm->PushOperation(&unlock_cluster_config_op_);
-            txm->Process(unlock_cluster_config_op_);
-        }
-    }
-    else if (op_ == &unlock_cluster_config_op_)
-    {
-        assert(op_type_ == OperationType::CreateTable ||
-               op_type_ == OperationType::Update ||
-               op_type_ == OperationType::TruncateTable);
-        if (unlock_cluster_config_op_.hd_result_.IsError())
-        {
-            if (txm->CheckLeaderTerm())
-            {
-                // Releasing a local read lock should never fail
-                assert(false);
-            }
-            else
-            {
-                ForceToFinish(txm);
-                return;
-            }
-        }
-        op_ = &upsert_kv_table_op_;
-        // The post write request right after flushing the prepare log
-        // installs the dirty schema in the tx service and returns a
-        // local view (pointer) of the committed and dirty schema.
-        upsert_kv_table_op_.table_schema_old_ = catalog_rec_.Schema();
-        upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
-        upsert_kv_table_op_.alter_table_info_ = nullptr;
-        upsert_kv_table_op_.write_time_ = txm->commit_ts_;
-        txm->PushOperation(&upsert_kv_table_op_);
-        txm->Process(upsert_kv_table_op_);
-    }
-    else if (op_ == &upsert_kv_table_op_)
-    {
-        if (upsert_kv_table_op_.hd_result_.IsError())
-        {
-            if (txm->CheckLeaderTerm())
-            {
-                // Keep retrying if it is DropTable, TruncateTable.
-                if (op_type_ == OperationType::DropTable ||
-                    op_type_ == OperationType::TruncateTable)
-                {
-                    txm->PushOperation(&upsert_kv_table_op_);
-                    DLOG(INFO) << "txn: " << txm->TxNumber()
-                               << " process upsert_kv_table_op_";
-                    txm->Process(upsert_kv_table_op_);
-                }
-                else
-                {
-                    // Set txm->commit_ts_ to 0 to indicate there is a flush
-                    // error during upsert_kv_table_op_.
-                    txm->commit_ts_ = tx_op_failed_ts_;
-
-                    /*
-                    After upsert kv fails, we need to flush a commit log to
-                    indicate this error.
-
-                    If we skip this commit log and jump to post_all_lock_op_
-                    directly, once the participant crashes at the point between
-                    it releases write intent and the coordinator flushes
-                    clean_log, then during recovery, the participant sees a
-                    prepare_log(whose commit_ts is not 0) and recovers write
-                    lock and dirty_catalog.
-
-                    Since the coordinator has finished its job, the write
-                    lock recovered by participant becomes orphan lock, and the
-                    dirty catalog can not be rejected either.
-
-                    Also, in the current design, post_all_intent_op_ does not
-                    release the write intent, which means the write intent is
-                    still being held after upsert_kv_table_op_(during
-                    CreateTable or AddIndex). If create table or add index in kv
-                    fails, the only thing we should do after writing commit_log
-                    is to reject dirty schema. So there is no need to upgrade
-                    write intent to write lock, and it is safe to skip
-                    acquire_all_lock_op_ and jump directly to commit_log_op_.
-
-                    */
-
-                    op_ = &commit_log_op_;
-                    FillCommitLogRequest(txm);
-                    txm->PushOperation(&commit_log_op_);
-                    txm->Process(commit_log_op_);
-                }
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-        }
-        else if (op_type_ == OperationType::CreateTable ||
-                 op_type_ == OperationType::DropTable ||
-                 op_type_ == OperationType::TruncateTable)
-        {
-            bool need_update_sequence_table =
-                !table_key_.Name().IsHashPartitioned() ||
-                (op_type_ == OperationType::CreateTable
-                     ? catalog_rec_.DirtySchema()->HasAutoIncrement()
-                     : catalog_rec_.Schema()->HasAutoIncrement());
-            if (need_update_sequence_table)
-            {
-                update_sequence_table_op_.op_func_ =
-                    [this](AsyncOp<Void> &async_op) mutable
-                {
-                    CcHandlerResult<Void> &hd_res = async_op.hd_result_;
-#ifdef EXT_TX_PROC_ENABLED
-                    hd_res.SetToBlock();
-                    // The memory fence ensures that the block flag is set
-                    // before the background thread is executed.
-                    std::atomic_thread_fence(std::memory_order_release);
-#endif
-                    assert(txservice::Sequences::Initialized());
-                    // Launch a new thread instead of sending it to workerpool
-                    // to avoid being blocked during write lock is held.
-                    async_op.worker_thread_ = std::thread(
-                        [this, &hd_res]() mutable
-                        {
-                            bool succ = true;
-                            const TableName &table_name = table_key_.Name();
-                            // Update sequence table about the range id info.
-                            std::vector<TableName> index_names =
-                                op_type_ == OperationType::CreateTable
-                                    ? catalog_rec_.DirtySchema()->IndexNames()
-                                    : catalog_rec_.Schema()->IndexNames();
-                            if (op_type_ == OperationType::CreateTable ||
-                                op_type_ == OperationType::TruncateTable)
-                            {
-                                if (!table_name.IsHashPartitioned())
-                                {
-                                    int32_t init_range_id =
-                                        Sequences::InitialRangePartitionIdOf(
-                                            table_name);
-                                    succ =
-                                        Sequences::InitIdOfTableRangePartition(
-                                            table_name, init_range_id);
-                                }
-
-                                // secondary index are always range partitioned.
-                                if (succ && index_names.size() > 0)
-                                {
-                                    succ = std::all_of(
-                                        index_names.begin(),
-                                        index_names.end(),
-                                        [](const TableName &index_name)
-                                        {
-                                            int32_t init_range_id = Sequences::
-                                                InitialRangePartitionIdOf(
-                                                    index_name);
-                                            return Sequences::
-                                                InitIdOfTableRangePartition(
-                                                    index_name, init_range_id);
-                                        });
-                                }
-                            }
-                            else if (op_type_ == OperationType::DropTable)
-                            {
-                                if (!table_name.IsHashPartitioned())
-                                {
-                                    succ = Sequences::DeleteSequence(
-                                        table_name,
-                                        SequenceType::RangePartitionId);
-                                }
-
-                                if (succ && index_names.size() > 0)
-                                {
-                                    succ = std::all_of(
-                                        index_names.begin(),
-                                        index_names.end(),
-                                        [](const TableName &index_name)
-                                        {
-                                            return Sequences::DeleteSequence(
-                                                index_name,
-                                                SequenceType::RangePartitionId);
-                                        });
-                                }
-                            }
-
-                            bool has_auto_increment =
-                                op_type_ == OperationType::CreateTable
-                                    ? catalog_rec_.DirtySchema()
-                                          ->HasAutoIncrement()
-                                    : catalog_rec_.Schema()->HasAutoIncrement();
-                            if (succ && has_auto_increment)
-                            {
-                                // Update sequence table about the auto
-                                // increment info.
-                                if (op_type_ == OperationType::CreateTable ||
-                                    op_type_ == OperationType::TruncateTable)
-                                {
-                                    succ =
-                                        Sequences::InitIdOfAutoIncrementColumn(
-                                            table_name);
-                                }
-                                else if (op_type_ == OperationType::DropTable)
-                                {
-                                    succ = Sequences::DeleteSequence(
-                                        table_name,
-                                        SequenceType::AutoIncrementColumn);
-                                }
-                            }
-
-                            if (succ)
-                            {
-                                hd_res.SetFinished();
-                            }
-                            else
-                            {
-                                LOG(ERROR) << "UpsertTableOp: failed to update"
-                                              " sequence info for table: "
-                                           << table_name.StringView();
-                                hd_res.SetError(
-                                    CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL);
-                            }
-                        });
-                };
-
-                DLOG(INFO) << "txn: " << txm->TxNumber()
-                           << " process update_sequence_table_op_";
-                op_ = &update_sequence_table_op_;
-                txm->PushOperation(&update_sequence_table_op_);
-                txm->Process(update_sequence_table_op_);
-            }
-            else if (op_type_ == OperationType::DropTable ||
-                     op_type_ == OperationType::TruncateTable)
-            {
-                const TableSchema *table_old_schema = catalog_rec_.Schema();
-                assert(table_old_schema->GetBaseTableName() ==
-                       table_key_.Name());
-                assert(clean_ccm_op_.table_names_.empty());
-
-                auto clean_ccm_names = table_old_schema->IndexNames();
-
-                clean_ccm_names.emplace_back(
-                    table_old_schema->GetBaseTableName().StringView().data(),
-                    table_old_schema->GetBaseTableName().StringView().size(),
-                    table_old_schema->GetBaseTableName().Type(),
-                    table_old_schema->GetBaseTableName().Engine());
-                clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
-                clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-                clean_ccm_op_.commit_ts_ = txm->CommitTs();
-
-                LOG(INFO) << "UpsertTableOp: Clean all ccmap on all node "
-                             "groups, txn: "
-                          << txm->TxNumber();
-
-                op_ = &clean_ccm_op_;
-                txm->PushOperation(&clean_ccm_op_);
-                txm->Process(clean_ccm_op_);
-            }
-            else
-            {
-                op_ = &lock_cluster_config_op_;
-                txm->PushOperation(&lock_cluster_config_op_);
-                txm->Process(lock_cluster_config_op_);
-            }
-        }
-        else
-        {
-            assert(op_type_ == OperationType::Update);
-            op_ = &lock_cluster_config_op_;
-            txm->PushOperation(&lock_cluster_config_op_);
-            txm->Process(lock_cluster_config_op_);
-        }
-    }
-    else if (op_ == &update_sequence_table_op_)
-    {
-        if (update_sequence_table_op_.hd_result_.IsError())
-        {
-            if (txm->CheckLeaderTerm())
-            {
-                // Retry
-                LOG(WARNING)
-                    << "Upsert table schema transaction retry to update"
-                       " sequence table, tx_number:"
-                    << txm->TxNumber();
-                txm->PushOperation(&update_sequence_table_op_);
-                txm->Process(update_sequence_table_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-            return;
-        }
-
-        if (op_type_ == OperationType::CreateTable)
-        {
-            op_ = &lock_cluster_config_op_;
-            txm->PushOperation(&lock_cluster_config_op_);
-            txm->Process(lock_cluster_config_op_);
-        }
-        else
-        {
-            assert(op_type_ == OperationType::DropTable ||
-                   op_type_ == OperationType::TruncateTable);
-
-            const TableSchema *table_old_schema = catalog_rec_.Schema();
-            assert(table_old_schema->GetBaseTableName() == table_key_.Name());
-            assert(clean_ccm_op_.table_names_.empty());
-
-            auto clean_ccm_names = table_old_schema->IndexNames();
-
-            clean_ccm_names.emplace_back(
-                table_old_schema->GetBaseTableName().StringView().data(),
-                table_old_schema->GetBaseTableName().StringView().size(),
-                table_old_schema->GetBaseTableName().Type(),
-                table_old_schema->GetBaseTableName().Engine());
-            clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
-
-            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-            clean_ccm_op_.commit_ts_ = txm->CommitTs();
-
-            LOG(INFO)
-                << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
-                << txm->TxNumber();
-
-            op_ = &clean_ccm_op_;
-            txm->PushOperation(&clean_ccm_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process clean_ccm_op_";
-            txm->Process(clean_ccm_op_);
-        }
-    }
-    else if (op_ == &acquire_all_lock_op_)
-    {
-        if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
-        {
-            // Fails to acquire the write lock. The schema operation can
-            // only roll forward after flushing the prepare log. Retries the
-            // request if the tx node is still the leader or the tx is in
-            // the recovery mode and the cc node is a leader candidate.
-            if (txm->CheckLeaderTerm())
-            {
-                LOG(ERROR) << "Upsert table schema transaction failed to "
-                              "acquire write lock, tx_number:"
-                           << txm->TxNumber();
-                // We downgrade catalog write lock to avoid blocking other
-                // transaction which acquiring catalog read lock. And then retry
-                // to acquire catalog write lock.
-                if (acquire_all_lock_op_.IsDeadlock())
-                {
-                    LOG(ERROR) << "Upsert table schema transaction deadlocks "
-                                  "with other transaction, downgrade write "
-                                  "lock, tx_number: "
-                               << txm->TxNumber();
-                    post_all_lock_op_.write_type_ =
-                        PostWriteType::DowngradeLock;
-                    op_ = &post_all_lock_op_;
-                    txm->PushOperation(&post_all_lock_op_);
-                    txm->Process(post_all_lock_op_);
-                }
-                else
-                {
-                    txm->PushOperation(&acquire_all_lock_op_);
-                    txm->Process(acquire_all_lock_op_);
-                }
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            op_ = &commit_log_op_;
-            FillCommitLogRequest(txm);
-            txm->PushOperation(&commit_log_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process commit_log_op_";
-            txm->Process(commit_log_op_);
-        }
-    }
-    else if (op_ == &commit_log_op_)
-    {
-        if (commit_log_op_.hd_result_.IsError())
-        {
-            // Fails to flush the commit log. Retries the operation if the
-            // tx node is still the leader or the tx is in the  recovery
-            // mode and the cc node is a leader candidate.
-            if (txm->CheckLeaderTerm())
-            {
-                // set retry flag and retry commit log
-                ::txlog::WriteLogRequest *log_req =
-                    commit_log_op_.log_closure_.LogRequest()
-                        .mutable_write_log_request();
-                log_req->set_retry(true);
-                txm->PushOperation(&commit_log_op_);
-                DLOG(INFO) << "txn: " << txm->TxNumber()
-                           << " process commit_log_op_";
-                txm->Process(commit_log_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            if (op_type_ == OperationType::DropTable ||
-                op_type_ == OperationType::TruncateTable)
-            {
-                // `clean_ccm_op` will notify each node group leader performs
-                // `UpsertTable` and `KickoutData` independently for rocksdb.
-                if (op_type_ == OperationType::TruncateTable &&
-                    !txservice_skip_kv &&
-                    !Sharder::Instance()
-                         .GetDataStoreHandler()
-                         ->IsSharedStorage())
-                {
-                    assert(clean_ccm_op_.table_names_.empty());
-                    clean_ccm_op_.table_names_.emplace_back(
-                        table_key_.Name().StringView().data(),
-                        table_key_.Name().StringView().size(),
-                        table_key_.Name().Type(),
-                        table_key_.Name().Engine());
-                    clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-                    clean_ccm_op_.commit_ts_ = txm->CommitTs();
-
-                    LOG(INFO) << "UpsertTableOp: Clean all ccmap on all node "
-                                 "groups, txn: "
-                              << txm->TxNumber();
-
-                    op_ = &clean_ccm_op_;
-                    txm->PushOperation(&clean_ccm_op_);
-                    DLOG(INFO) << "txn: " << txm->TxNumber()
-                               << " process clean_ccm_op_";
-                    txm->Process(clean_ccm_op_);
-                }
-                else
-                {
-                    op_ = &upsert_kv_table_op_;
-                    upsert_kv_table_op_.table_schema_old_ =
-                        catalog_rec_.Schema();
-                    upsert_kv_table_op_.table_schema_ =
-                        catalog_rec_.DirtySchema();
-                    upsert_kv_table_op_.alter_table_info_ = nullptr;
-                    upsert_kv_table_op_.write_time_ = txm->commit_ts_;
-                    txm->PushOperation(&upsert_kv_table_op_);
-                    DLOG(INFO) << "txn: " << txm->TxNumber()
-                               << " process upsert_kv_table_op_";
-                    txm->Process(upsert_kv_table_op_);
-                }
-            }
-            else
-            {
-                ACTION_FAULT_INJECTOR("upsert_table_post_all_lock");
-                assert(post_all_lock_op_.write_type_ ==
-                       PostWriteType::PostCommit);
-                catalog_rec_.SetSchemaImage(catalog_rec_.DirtySchemaImage());
-                catalog_rec_.ClearDirtySchema();
-                op_ = &post_all_lock_op_;
-                txm->PushOperation(&post_all_lock_op_);
-                txm->Process(post_all_lock_op_);
-            }
-        }
-    }
-    else if (op_ == &clean_ccm_op_)
-    {
-        assert(op_type_ == OperationType::TruncateTable ||
-               op_type_ == OperationType::DropTable);
-        if (clean_ccm_op_.hd_result_.IsError())
-        {
-            if (txm->CheckLeaderTerm())
-            {
-                LOG(ERROR)
-                    << "UpsertTableOp: failed to truncate table, err code: "
-                    << (int) clean_ccm_op_.hd_result_.ErrorCode()
-                    << ", err msg: " << clean_ccm_op_.hd_result_.ErrorMsg()
-                    << ", txn: " << txm->TxNumber() << ", keep retrying";
-                op_ = &clean_ccm_op_;
-                txm->PushOperation(&clean_ccm_op_);
-                txm->Process(clean_ccm_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-
-            return;
-        }
-
-        clean_ccm_op_.Clear();
-
-        // Clear write set before commit dirty schema.
-        txm->rw_set_.ClearWriteSet(table_key_.Name());
-        txm->rw_set_.ClearReadSet(table_key_.Name());
-
-        // Update catalog record to the latest schema.
-        catalog_rec_.SetSchemaImage(catalog_rec_.DirtySchemaImage());
-        catalog_rec_.ClearDirtySchema();
-
-        // For DROP TABLE and TRUNCATE TABLE, the data store operation
-        // happens after all write locks are acquired and commit log is
-        // flushed.
-        op_ = &post_all_lock_op_;
-        txm->PushOperation(&post_all_lock_op_);
-        DLOG(INFO) << "txn: " << txm->TxNumber()
-                   << " process post_all_lock_op_";
-        txm->Process(post_all_lock_op_);
-    }
-    else if (op_ == &post_all_lock_op_)
-    {
-        if (!txm->CheckLeaderTerm())
-        {
-            // The tx node is no longer the leader or leader candidate(during
-            // recovery), ForceToFinish.
-            ForceToFinish(txm);
-            return;
-        }
-
-        // The tx's modification of the schema has finished. If the tx has
-        // previously read the same schema and keeps a pointer in the read set
-        // to the cc entry of the schema, removes it from the read set. As a
-        // result, the tx will not try to release the read lock of the schema
-        // when committing.
-        for (size_t idx = 0; idx < acquire_all_intent_op_.upload_cnt_; ++idx)
-        {
-            const CcEntryAddr &schema_entry_addr =
-                acquire_all_intent_op_.hd_results_[idx].Value().local_cce_addr_;
-            if (schema_entry_addr.NodeGroupId() == txm->TxCcNodeId())
-            {
-                txm->rw_set_.DedupRead(schema_entry_addr);
-            }
-        }
-
-        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
-            0)
-        {
-            // The schema operation failed at acquire_all_intent_op_, without
-            // flushing the prepare log. Do not retry post-processing (release
-            // write intents) even if it fails. Remaining write intents on the
-            // schema, if there are any, will be recovered by individual cc
-            // nodes separately.
-
-            txm->upsert_resp_->Finish(UpsertResult::Failed);
-
-            txm->state_stack_.pop_back();
-            assert(txm->state_stack_.empty());
-
-            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(shards->table_schema_op_pool_mux_);
-            shards->table_schema_op_pool_.emplace_back(
-                std::move(txm->schema_op_));
-        }
-        else if (post_all_lock_op_.hd_result_.IsError())
-        {
-            // post_all_lock_op_ returns an error:
-            // 1. if flush kv succeeds, the schema op is guaranteed to succeed
-            // and can only roll forward. Retry this step to install the
-            // committed schema and remove write locks;
-            // 2. if flush kx fails, the schema op has to roll backward. Retry
-            // this step to reject dirty schema and remove write locks.
-            txm->PushOperation(&post_all_lock_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process post_all_lock_op_, "
-                       << post_all_lock_op_.hd_result_.ErrorMsg();
-            txm->Process(post_all_lock_op_);
-            return;
-        }
-        else
-        {
-            // post_all_lock_op_ has finished without an error.
-            assert(!post_all_lock_op_.IsFailed());
-
-            if (post_all_lock_op_.write_type_ == PostWriteType::DowngradeLock)
-            {
-                // Reset write type to PostCommit
-                post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
-                op_ = &acquire_all_lock_op_;
-                txm->PushOperation(&acquire_all_lock_op_);
-                txm->Process(acquire_all_lock_op_);
-                return;
-            }
-            else if (txm->commit_ts_ != tx_op_failed_ts_)
-            {
-                assert(post_all_lock_op_.write_type_ !=
-                       PostWriteType::DowngradeLock);
-            }
-            else
-            {
-                assert(post_all_lock_op_.write_type_ !=
-                       PostWriteType::DowngradeLock);
-                // Flush kv failed, or it is recovering from a flush kv failure.
-                // This schema op has already been rolled back by now, only need
-                // to flush clean log here.
-                // Also, flush kv failure does not require lock upgrade(write
-                // intent to write lock). So the CcEntryAddr needs to be kept in
-                // rset in order to release the read lock when committing.
-            }
-
-            op_ = &clean_log_op_;
-            FillCleanLogRequestCommon(txm, clean_log_op_);
-            txm->PushOperation(&clean_log_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process clean_log_op_";
-            txm->Process(clean_log_op_);
-        }
-    }
-    else if (op_ == &clean_log_op_)
-    {
-        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-        if (clean_log_op_.hd_result_.IsError() && txm->CheckLeaderTerm())
-        {
-            // set retry flag and retry clean log
-            ::txlog::WriteLogRequest *log_req =
-                clean_log_op_.log_closure_.LogRequest()
-                    .mutable_write_log_request();
-            log_req->set_retry(true);
-            txm->PushOperation(&clean_log_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process clean_log_op_";
-            txm->Process(clean_log_op_);
-        }
-        else
-        {
-            CODE_FAULT_INJECTOR("alter_schema_term_changed", {
-                LOG(INFO) << "FaultInject  alter_schema_term_changed";
-                is_force_finished = true;
-            });
-
-            if (txm->commit_ts_ == tx_op_failed_ts_)
-            {
-                // Flush kv error or fail to flush prepare_log.
-                txm->upsert_resp_->Finish(UpsertResult::Failed);
-            }
-            else
-            {
-                assert(txm->commit_ts_ > 0);
-                if (is_force_finished)
-                {
-                    txm->upsert_resp_->Finish(UpsertResult::Unverified);
-                }
-                else
-                {
-                    txm->upsert_resp_->Finish(UpsertResult::Succeeded);
-                }
-            }
-
-            txm->state_stack_.pop_back();
-            assert(txm->state_stack_.empty());
-
-            txm->schema_op_->catalog_rec_.Reset();
-            std::unique_lock<std::mutex> lk(shards->table_schema_op_pool_mux_);
-            shards->table_schema_op_pool_.emplace_back(
-                std::move(txm->schema_op_));
-        }
-    }
-}
-
-void UpsertTableOp::Reset(const std::string_view table_name_str,
-                          TableEngine table_engine,
-                          const std::string &current_image,
-                          uint64_t curr_schema_ts,
-                          const std::string &dirty_image,
-                          OperationType op_type,
-                          TransactionExecution *txm)
-{
-    assert(op_type_ == OperationType::CreateTable ||
-           op_type_ == OperationType::Update ||
-           op_type_ == OperationType::DropTable ||
-           op_type_ == OperationType::TruncateTable);
-
-    // reset TransactionOperation
-    retry_num_ = RETRY_NUM;
-    is_running_ = false;
-
-    // reset SchemaOp
-    table_key_.Name() = TableName(table_name_str.data(),
-                                  table_name_str.size(),
-                                  TableType::Primary,
-                                  table_engine);
-    catalog_rec_.SetSchemaImage(current_image);
-    catalog_rec_.SetDirtySchemaImage(dirty_image);
-    image_str_ = current_image;
-    dirty_image_str_ = dirty_image;
-    curr_schema_ts_ = curr_schema_ts;
-
-    // reset UpsertTableOp
-    op_type_ = op_type;
-    op_ = nullptr;
-
-    // reset op
-    read_cluster_result_.Reset();
-    cluster_conf_rec_.Reset();
-    lock_cluster_config_op_.Reset();
-    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
-                                                    TableType::ClusterConfig,
-                                                    TableEngine::None);
-    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
-    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
-    prepare_log_op_.Reset();
-    unlock_cluster_config_op_.Reset();
-    upsert_kv_table_op_.Reset();
-    update_sequence_table_op_.Reset();
-    commit_log_op_.Reset();
-    clean_log_op_.Reset();
-
-    acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_intent_op_.keys_.clear();
-    acquire_all_intent_op_.keys_.emplace_back(&table_key_);
-    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
-    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
-
-    post_all_intent_op_.table_name_ = &catalog_ccm_name;
-    post_all_intent_op_.keys_.clear();
-    post_all_intent_op_.keys_.emplace_back(&table_key_);
-    post_all_intent_op_.recs_.clear();
-    post_all_intent_op_.recs_.push_back(&catalog_rec_);
-    post_all_intent_op_.op_type_ = op_type_;
-    post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
-
-    upsert_kv_table_op_.alter_table_info_ = nullptr;
-    upsert_kv_table_op_.op_type_ = op_type_;
-    upsert_kv_table_op_.write_time_ = 0;
-
-    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
-    acquire_all_lock_op_.keys_.clear();
-    acquire_all_lock_op_.keys_.emplace_back(&table_key_);
-    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
-    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
-
-    post_all_lock_op_.table_name_ = &catalog_ccm_name;
-    post_all_lock_op_.keys_.clear();
-    post_all_lock_op_.keys_.emplace_back(&table_key_);
-    post_all_lock_op_.recs_.clear();
-    post_all_lock_op_.recs_.push_back(&catalog_rec_);
-    post_all_lock_op_.op_type_ = op_type_;
-    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
-
-    clean_ccm_op_.Clear();
-    clean_ccm_op_.hd_result_.Reset();
-
-    // reset cc_handler_res txm
-    read_cluster_result_.ResetTxm(txm);
-    acquire_all_intent_op_.ResetHandlerTxm(txm);
-    prepare_log_op_.ResetHandlerTxm(txm);
-    post_all_intent_op_.ResetHandlerTxm(txm);
-    unlock_cluster_config_op_.ResetHandlerTxm(txm);
-    upsert_kv_table_op_.ResetHandlerTxm(txm);
-    update_sequence_table_op_.ResetHandlerTxm(txm);
-    acquire_all_lock_op_.ResetHandlerTxm(txm);
-    commit_log_op_.ResetHandlerTxm(txm);
-    clean_ccm_op_.ResetHandlerTxm(txm);
-    post_all_lock_op_.ResetHandlerTxm(txm);
-    clean_log_op_.ResetHandlerTxm(txm);
-
-    is_force_finished = false;
-}
-
-void UpsertTableOp::FillPrepareLogRequest(TransactionExecution *txm)
-{
-    FillPrepareLogRequestCommon(txm, prepare_log_op_);
-    ::txlog::WriteLogRequest *prepare_log_rec =
-        prepare_log_op_.log_closure_.LogRequest().mutable_write_log_request();
-
-    auto &node_terms = *prepare_log_rec->mutable_node_terms();
-    node_terms.clear();
-    for (size_t idx = 0; idx < acquire_all_intent_op_.upload_cnt_; ++idx)
-    {
-        const AcquireAllResult &hres_val =
-            acquire_all_intent_op_.hd_results_[idx].Value();
-        uint32_t ng_id = hres_val.local_cce_addr_.NodeGroupId();
-        node_terms[ng_id] = hres_val.node_term_;
-    }
-}
-
-void UpsertTableOp::FillCommitLogRequest(TransactionExecution *txm)
-{
-    FillCommitLogRequestCommon(txm, commit_log_op_);
-
-    ::txlog::WriteLogRequest *commit_log_rec =
-        commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
-
-    assert(txm->commit_ts_ != tx_op_failed_ts_ ||
-           upsert_kv_table_op_.hd_result_.IsError());
-    commit_log_rec->set_commit_timestamp(txm->commit_ts_);
-}
-
-void UpsertTableOp::ForceToFinish(TransactionExecution *txm)
-{
-    clean_log_op_.hd_result_.SetFinished();
-    op_ = &clean_log_op_;
-    is_force_finished = true;
-    Forward(txm);
 }
 
 FlushUpdateTableOp::FlushUpdateTableOp(TransactionExecution *txm)
@@ -3920,6 +2928,36 @@ void AsyncOp<ResultType>::Reset()
     {
         worker_thread_.join();
     }
+}
+
+template <typename ResultType>
+void AsyncOp<ResultType>::SetBlockingWork(std::function<CcErrorCode()> work)
+{
+    op_func_ = [work = std::move(work)](AsyncOp<ResultType> &async_op)
+    {
+        // Forward() or Reset() joined the thread of an earlier run.
+        assert(!async_op.worker_thread_.joinable());
+        CcHandlerResult<ResultType> &hd_res = async_op.hd_result_;
+#ifdef EXT_TX_PROC_ENABLED
+        // Starting the thread orders the flag before the worker reads it.
+        hd_res.SetToBlock();
+#endif
+        // The thread uses the work stored in op_func_: op_func_ outlives the
+        // thread, which Forward(), Reset() and ~AsyncOp() join.
+        async_op.worker_thread_ = std::thread(
+            [&work, &hd_res]()
+            {
+                CcErrorCode err = work();
+                if (err == CcErrorCode::NO_ERROR)
+                {
+                    hd_res.SetFinished();
+                }
+                else
+                {
+                    hd_res.SetError(err);
+                }
+            });
+    };
 }
 
 template struct AsyncOp<PostProcessResult>;
@@ -4328,13 +3366,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
-            assert(this == txm->split_flush_op_.get());
+            assert(this == txm->CompositeOpSlot<SplitFlushRangeOp>().get());
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                shards->split_flush_range_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(shards->op_pool_mux_);
             shards->split_flush_range_op_pool_.emplace_back(
-                std::move(txm->split_flush_op_));
-            assert(txm->split_flush_op_ == nullptr);
+                std::move(txm->CompositeOpSlot<SplitFlushRangeOp>()));
+            assert(txm->CompositeOpSlot<SplitFlushRangeOp>() == nullptr);
         }
         return;
     }
@@ -4421,9 +3458,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                           "lock, tx_number:"
                        << txm->TxNumber();
 
-            // Set commit ts to 0 to indicate transaction failure.
-            // post_all_lock_op_ will release locks acquired.
+            // The split fails: post_all_lock_op_ rolls back at commit ts 0,
+            // releasing the locks acquired.
             txm->commit_ts_ = tx_op_failed_ts_;
+            post_all_lock_op_.write_type_ = PostWriteType::Rollback;
             ForwardToSubOperation(txm, &post_all_lock_op_);
             return;
         }
@@ -4492,9 +3530,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                // Set commit ts to 0 to indicate transaction failure.
-                // post_all_lock_op_ will release locks acquired.
+                // The split fails: post_all_lock_op_ rolls back at commit ts
+                // 0, releasing the locks acquired.
                 txm->commit_ts_ = tx_op_failed_ts_;
+                post_all_lock_op_.write_type_ = PostWriteType::Rollback;
                 ForwardToSubOperation(txm, &post_all_lock_op_);
             }
             return;
@@ -4854,41 +3893,35 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             GenSplittedRangeInfos();
 
         // Insert new ranges into data store range table. Update
-        // range slice size of the old range.
-        ds_upsert_range_op_.op_func_ =
+        // range slice size of the old range. On its own thread, not the
+        // worker pool, so that it is not blocked while the write lock is
+        // held. A failed upsert is retried (RetrySubOperation) with the same
+        // range_info, which UpsertRanges only reads.
+        ds_upsert_range_op_.SetBlockingWork(
             [&table_name = table_name_,
              range_info = std::move(splitted_range_info),
-             tx_ts = txm->commit_ts_](AsyncOp<Void> &async_op) mutable
-        {
-            CcHandlerResult<Void> &hd_res = async_op.hd_result_;
-#ifdef EXT_TX_PROC_ENABLED
-            hd_res.SetToBlock();
-            // The memory fence ensures that the block flag is set before the
-            // background data store thread is executed.
-            std::atomic_thread_fence(std::memory_order_release);
-#endif
-            // Launch a new thread instead of sending it to workerpool to
-            // avoid being blocked during write lock is held.
-            async_op.worker_thread_ = std::thread(
-                [table_name,
-                 range_info = std::move(range_info),
-                 tx_ts,
-                 &hd_res]() mutable
-                {
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    bool succ = store_hd->UpsertRanges(
-                        table_name, std::move(range_info), tx_ts);
-                    if (succ)
-                    {
-                        hd_res.SetFinished();
-                    }
-                    else
-                    {
-                        hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
-                    }
+             tx_ts = txm->commit_ts_]()
+            {
+                store::DataStoreHandler *const store_hd =
+                    Sharder::Instance().GetLocalCcShards()->store_hd_;
+                // Fails one upsert before it writes, so that the retry must
+                // write the ranges.
+                CODE_FAULT_INJECTOR("split_flush_upsert_ranges_fail", {
+                    LOG(INFO) << "FaultInject split_flush_upsert_ranges_fail, "
+                                 "ranges: "
+                              << range_info.size();
+                    FaultInject::Instance().InjectFault(
+                        "split_flush_upsert_ranges_fail", "remove");
+                    return CcErrorCode::DATA_STORE_ERR;
                 });
-        };
+                LOG(INFO) << "Split Flush transaction upsert "
+                          << range_info.size()
+                          << " ranges into the data store, table: "
+                          << table_name.StringView();
+                return store_hd->UpsertRanges(table_name, range_info, tx_ts)
+                           ? CcErrorCode::NO_ERROR
+                           : CcErrorCode::DATA_STORE_ERR;
+            });
 
         LOG(INFO) << "Split Flush transaction upsert new range spec, range id "
                   << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
@@ -5090,13 +4123,12 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());
 
-            assert(this == txm->split_flush_op_.get());
+            assert(this == txm->CompositeOpSlot<SplitFlushRangeOp>().get());
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                shards->split_flush_range_op_pool_mux_);
+            std::unique_lock<std::mutex> lk(shards->op_pool_mux_);
             shards->split_flush_range_op_pool_.emplace_back(
-                std::move(txm->split_flush_op_));
-            assert(txm->split_flush_op_ == nullptr);
+                std::move(txm->CompositeOpSlot<SplitFlushRangeOp>()));
+            assert(txm->CompositeOpSlot<SplitFlushRangeOp>() == nullptr);
         }
     }
 }
@@ -6686,9 +5718,9 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
 
         {
             auto shards = Sharder::Instance().GetLocalCcShards();
-            std::lock_guard<std::mutex> lk(shards->cluster_scale_op_mux_);
+            std::lock_guard<std::mutex> lk(shards->op_pool_mux_);
             shards->cluster_scale_op_pool_.push_back(
-                std::move(txm->cluster_scale_op_));
+                std::move(txm->CompositeOpSlot<ClusterScaleOp>()));
         }
 
         if (txm->CommitTs() != tx_op_failed_ts_)
@@ -7400,10 +6432,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
             {
                 auto shards = Sharder::Instance().GetLocalCcShards();
-                std::lock_guard<std::mutex> lk(
-                    shards->data_migration_op_pool_mux_);
+                std::lock_guard<std::mutex> lk(shards->op_pool_mux_);
                 shards->migration_op_pool_.push_back(
-                    std::move(txm->migration_op_));
+                    std::move(txm->CompositeOpSlot<DataMigrationOp>()));
             }
             // Abort and recyle txm
             txm->Abort();
@@ -8247,8 +7278,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
         {
             auto shards = Sharder::Instance().GetLocalCcShards();
-            std::lock_guard<std::mutex> lk(shards->data_migration_op_pool_mux_);
-            shards->migration_op_pool_.push_back(std::move(txm->migration_op_));
+            std::lock_guard<std::mutex> lk(shards->op_pool_mux_);
+            shards->migration_op_pool_.push_back(
+                std::move(txm->CompositeOpSlot<DataMigrationOp>()));
         }
         // Commit the tx and recyle txm
         txm->Commit();
@@ -8428,7 +7460,13 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-        assert(lock_range_bucket_result_->IsFinished());
+        // Back from lock_range_op_, or from the wait before a retry
+        // (ReRunOp). A hash-partitioned batch whose buckets were all already
+        // known (FastToGetBucket) runs no lock op, so a retry finds the lock
+        // result still reset: neither finished nor errored, and every key's
+        // node group already set (lock_index_ is at the end).
+        assert(lock_range_bucket_result_->IsFinished() ||
+               batch_read_tx_req_->tab_name_->IsHashPartitioned());
         std::vector<ScanBatchTuple> &read_batch =
             batch_read_tx_req_->read_batch_;
 
@@ -8668,7 +7706,9 @@ InvalidateTableCacheCompositeOp::InvalidateTableCacheCompositeOp(
     post_all_lock_op_.keys_.emplace_back(&catalog_key_);
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = OperationType::Update;
-    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+    // Its second phase only releases the write locks, rolling back at
+    // timestamp 0: nothing was prepared on the catalog entry.
+    post_all_lock_op_.write_type_ = PostWriteType::Rollback;
 }
 
 void InvalidateTableCacheCompositeOp::Reset(const TableName *table_name,
@@ -8696,7 +7736,9 @@ void InvalidateTableCacheCompositeOp::Reset(const TableName *table_name,
     post_all_lock_op_.recs_.clear();
     post_all_lock_op_.recs_.push_back(&catalog_rec_);
     post_all_lock_op_.op_type_ = OperationType::Update;
-    post_all_lock_op_.write_type_ = PostWriteType::PostCommit;
+    // Its second phase only releases the write locks, rolling back at
+    // timestamp 0: nothing was prepared on the catalog entry.
+    post_all_lock_op_.write_type_ = PostWriteType::Rollback;
 
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     invalidate_table_cache_op_.ResetHandlerTxm(txm);
@@ -8778,9 +7820,9 @@ void InvalidateTableCacheCompositeOp::Forward(TransactionExecution *txm)
         txm->state_stack_.pop_back();
         LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
         assert(txm->state_stack_.empty());
-        std::unique_lock<std::mutex> lk(shards->invalidate_table_cache_op_mux_);
+        std::unique_lock<std::mutex> lk(shards->op_pool_mux_);
         shards->invalidate_table_cache_op_pool_.emplace_back(
-            std::move(txm->invalidate_table_cache_composite_op_));
+            std::move(txm->CompositeOpSlot<InvalidateTableCacheCompositeOp>()));
     }
 }
 

@@ -1523,19 +1523,49 @@ public:
     bthread::Mutex req_mux_{};
 };
 
+/**
+ * @brief The shard's eviction pass: evicts entries that are checkpointed,
+ * unlocked and unpinned from the LRU chain, and resumes requests parked for
+ * memory.
+ *
+ * One instance per shard (CcShard::shard_clean_cc_). It is scheduled when a
+ * request parks or a FindEmplace finds the heap full, re-enqueues itself
+ * behind every batch it releases, and stays in use while deferred between
+ * passes, so at most one pass or retry is ever pending. The decision rules
+ * are documented with Execute().
+ */
 struct ShardCleanCc : public CcRequestBase
 {
 public:
-    ShardCleanCc() : free_count_(0)
-    {
-    }
+    ShardCleanCc() = default;
 
     ShardCleanCc(ShardCleanCc &&rhs) = delete;
 
     bool Execute(CcShard &ccs) override;
 
 private:
-    size_t free_count_{0};
+    /** Set from the first execution of a pass until the pass ends. */
+    bool pass_started_{false};
+    /** Entries freed by this pass so far. */
+    size_t freed_in_pass_{0};
+    /**
+     * Bytes this pass reclaimed so far, summed over its eviction batches. A
+     * pass that ends under FLAGS_shard_clean_release_kb is not keeping up:
+     * it asks for a checkpoint and its retry backs off.
+     */
+    int64_t reclaimed_in_pass_{0};
+    /**
+     * CcShard::MemoryParkCount() when this pass started or last released a
+     * batch, whichever is later; a later park means a request found the heap
+     * at its hard limit since then.
+     */
+    uint64_t park_snapshot_{0};
+    /**
+     * Bytes this pass reclaimed since it started or last released a batch;
+     * after a limit hit the next release waits for
+     * FLAGS_shard_clean_release_kb of them.
+     */
+    int64_t reclaimed_since_release_{0};
 };
 
 struct FetchTableRangeSizeCc : public CcRequestBase

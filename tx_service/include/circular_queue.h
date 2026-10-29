@@ -24,6 +24,7 @@
 #ifndef CIRCULAR_QUEUE_H
 #define CIRCULAR_QUEUE_H
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 

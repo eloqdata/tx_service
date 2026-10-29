@@ -12,6 +12,7 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -82,7 +83,8 @@ public:
                         uint32_t snapshot_interval,
                         bool enable_request_checkpoint,
                         uint32_t check_replay_log_size_interval_sec,
-                        uint64_t notify_checkpointer_threshold_size)
+                        uint64_t notify_checkpointer_threshold_size,
+                        uint64_t cdc_retention_seconds = 0)
     {
         std::pair<std::unordered_map<uint32_t, LogUtil::RaftGroupConfig>,
                   uint32_t>
@@ -152,7 +154,8 @@ public:
                         snapshot_interval,
                         enable_request_checkpoint,
                         check_replay_log_size_interval_sec,
-                        notify_checkpointer_threshold_size);
+                        notify_checkpointer_threshold_size,
+                        cdc_retention_seconds);
                 }
             }
         }
@@ -268,6 +271,8 @@ public:
         std::string notify_checkpointer_threshold_size_str =
             config_reader.GetString(
                 "local", "notify_checkpointer_threshold_size", "1GB");
+        uint64_t cdc_retention_seconds =
+            config_reader.GetInteger("local", "txlog_cdc_retention_seconds", 0);
 
 #if defined(LOG_STATE_TYPE_RKDB_ALL)
         std::string rocksdb_storage_path =
@@ -342,6 +347,7 @@ public:
             << check_replay_log_size_interval_sec
             << ", notify_checkpointer_threashold_size = "
             << notify_checkpointer_threshold_size_str
+            << ", txlog_cdc_retention_seconds = " << cdc_retention_seconds
 #if defined(LOG_STATE_TYPE_RKDB_S3)
             << ", aws_access_key_id = " << aws_access_key_id
             << ", aws_secret_key = "
@@ -492,6 +498,9 @@ public:
 
 #endif
 
+        // Under replicas_mutex_, against EnableMetrics' walk of the map; the
+        // replicas get their metrics if they were enabled before the attach.
+        std::unique_lock<std::mutex> replicas_lk(replicas_mutex_);
         AddLogReplicas(node_id,
                        ip_list,
                        port_list,
@@ -520,7 +529,10 @@ public:
                        snapshot_interval,
                        enable_request_checkpoint,
                        check_replay_log_size_interval_sec,
-                       notify_checkpointer_threshold_size);
+                       notify_checkpointer_threshold_size,
+                       cdc_retention_seconds);
+        EnableReplicaMetricsLocked();
+        replicas_lk.unlock();
 
         assert(service_status_ == Status::DETACHED);
 
@@ -529,7 +541,10 @@ public:
         if (err != 0)
         {
             LOG(ERROR) << "Attach log service: fail to start raft node";
-            log_replicas_.clear();
+            {
+                std::lock_guard<std::mutex> lk(replicas_mutex_);
+                log_replicas_.clear();
+            }
             service_status_.store(Status::DETACHED, std::memory_order_release);
             response->set_err_code(
                 ::txlog::AttachLogErrorCode::INSTANCE_INIT_ERROR);
@@ -590,7 +605,10 @@ public:
             instance.shutdown();
             instance.join();
         }
-        log_replicas_.clear();
+        {
+            std::lock_guard<std::mutex> lk(replicas_mutex_);
+            log_replicas_.clear();
+        }
 
         service_status_.store(Status::DETACHED, std::memory_order_release);
         LOG(INFO) << "Detach log service: service is detached";
@@ -642,6 +660,37 @@ public:
 
         return logger_it->second.CheckMigrationIsFinished(
             request, response, done);
+    }
+
+    /**
+     * @brief Finds the raft log instance of the requested log group and
+     * serves one page of the CDC log scan from it.
+     *
+     * @param controller The RPC controller.
+     * @param request The scan request.
+     * @param[out] response The page, or NotLeader when this node holds no
+     *        replica of the group.
+     * @param done Run when the response is complete.
+     */
+    void CdcScan(::google::protobuf::RpcController *controller,
+                 const ::txlog::CdcScanRequest *request,
+                 ::txlog::CdcScanResponse *response,
+                 ::google::protobuf::Closure *done) override
+    {
+        auto logger_it = log_replicas_.find(request->log_group_id());
+        if (logger_it == log_replicas_.end())
+        {
+            // No replica of the group here, which includes a detached
+            // service. The caller finds the leader through its own cache.
+            brpc::ClosureGuard done_guard(done);
+            response->set_status(CdcScanResponse::NotLeader);
+            return;
+        }
+
+        logger_it->second.CdcScan(static_cast<brpc::Controller *>(controller),
+                                  request,
+                                  response,
+                                  done);
     }
 
     /*
@@ -939,8 +988,54 @@ public:
         }
     }
 
+    /**
+     * @brief Starts exporting every log group's change data capture metrics
+     * (LogInstance::EnableMetrics), for the groups present now and for those
+     * a later AttachLog adds.
+     *
+     * @param registry The process's metrics registry.
+     * @param node_labels The node's common labels.
+     */
+    void EnableMetrics(metrics::MetricsRegistry *registry,
+                       const metrics::CommonLabels &node_labels)
+    {
+        std::lock_guard<std::mutex> lk(replicas_mutex_);
+        metrics_registry_ = registry;
+        metrics_labels_ = node_labels;
+        EnableReplicaMetricsLocked();
+    }
+
 private:
+    /**
+     * @brief Enables the metrics of every replica that has none, once
+     * EnableMetrics() has been called; LogInstance::EnableMetrics ignores a
+     * replica already enabled. Called with replicas_mutex_ held.
+     */
+    void EnableReplicaMetricsLocked()
+    {
+        if (metrics_registry_ == nullptr)
+        {
+            return;
+        }
+        for (auto &logger_pair : log_replicas_)
+        {
+            logger_pair.second.EnableMetrics(metrics_registry_,
+                                             metrics_labels_);
+        }
+    }
+
     std::atomic<Status> service_status_{Status::ATTACHED};
+
+    /**
+     * @brief Guards log_replicas_ insertions and clears (AttachLog, DetachLog)
+     * against EnableMetrics' walk of it, and metrics_registry_ and
+     * metrics_labels_.
+     */
+    std::mutex replicas_mutex_;
+    /** @brief Set by EnableMetrics(); nullptr while metrics are off. */
+    metrics::MetricsRegistry *metrics_registry_{nullptr};
+    /** @brief The node's common labels EnableMetrics() was given. */
+    metrics::CommonLabels metrics_labels_;
 
     // raft log nodes (no matter leader or followers) which belong to this
     // raft service.

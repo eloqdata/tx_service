@@ -62,6 +62,12 @@ DEFINE_string(notify_checkpointer_threshold_size,
               "When the size of non-checkpoint txlogs reache this threshold, "
               "the log_service sends a checkpoint request to tx_service.");
 
+DEFINE_uint64(txlog_cdc_retention_seconds,
+              0,
+              "How far behind the checkpoint the log state keeps the data log "
+              "for change data capture: no purge removes a record within this "
+              "window. 0 keeps no window.");
+
 DEFINE_bool(enable_brpc_builtin_services,
             true,
             "Enable showing brpc builtin services through http.");
@@ -255,7 +261,8 @@ void launch(const std::string &tt_conf,
                             FLAGS_snapshot_interval,
                             FLAGS_enable_request_checkpoint,
                             FLAGS_check_replay_log_size_interval_sec,
-                            notify_checkpointer_threshold_size);
+                            notify_checkpointer_threshold_size,
+                            FLAGS_txlog_cdc_retention_seconds);
 
     int start_status = server.Start(FLAGS_enable_brpc_builtin_services);
     if (start_status != 0)
@@ -417,6 +424,12 @@ int main(int argc, char *argv[])
             : config_reader.GetString("local",
                                       "notify_checkpointer_threshold_size",
                                       FLAGS_notify_checkpointer_threshold_size);
+    FLAGS_txlog_cdc_retention_seconds =
+        !CheckCommandLineFlagIsDefault("txlog_cdc_retention_seconds")
+            ? FLAGS_txlog_cdc_retention_seconds
+            : config_reader.GetInteger("local",
+                                       "txlog_cdc_retention_seconds",
+                                       FLAGS_txlog_cdc_retention_seconds);
     FLAGS_enable_brpc_builtin_services =
         !CheckCommandLineFlagIsDefault("enable_brpc_builtin_services")
             ? FLAGS_enable_brpc_builtin_services

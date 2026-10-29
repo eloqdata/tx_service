@@ -79,7 +79,9 @@ struct UpsertTableIndexOp : public SchemaOp
     /**
      * @brief Acquire read lock on local cluster config ccmap to block cluster
      * config update during upsert table op. We cannot allow config update
-     * between acquire write all and post write all.
+     * between acquire write all and post write all. The op's first step; it
+     * holds the lock until its last post write all
+     * (unlock_cluster_config_op_).
      */
     ReadLocalOperation lock_cluster_config_op_;
     /**
@@ -94,6 +96,24 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     AcquireAllOp upgrade_all_intent_to_lock_op_;
     /**
+     * @brief For add index, creates the kv table of each index being added
+     * (DataStoreHandler::CreateKvTable), before the prepare log and under the
+     * prepare-stage write lock.
+     *
+     * Recovery returns a node to the state right after the prepare log, in
+     * which the dirty schema is installed and DML writes the new index, so its
+     * kv table must exist in every state recovery can reach. The kv catalog is
+     * written only after the commit log (kv_update_schema_image_op_).
+     */
+    AsyncOp<Void> create_kv_table_op_;
+    /**
+     * @brief Drops the kv tables create_kv_table_op_ created, when the add
+     * index fails before its prepare log is flushed. A coordinator failure
+     * before it finishes leaves them orphaned, which is harmless: no schema
+     * refers to them.
+     */
+    AsyncOp<Void> drop_kv_table_op_;
+    /**
      * @brief Flushes the prepare log to the log service. The schema operation
      * is guaranteed to succeed after this stage.
      */
@@ -104,14 +124,10 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     PostWriteAllOp downgrade_all_lock_to_intent_op_;
     /**
-     * @brief Release cluster config read lock after post write all.
+     * @brief Release cluster config read lock after post write all: after the
+     * op's last one, post_all_lock_op_, before the clean log.
      */
     PostReadOperation unlock_cluster_config_op_;
-    /**
-     * @brief Creates/deletes the data store table and persists/removes the
-     * binary representation of the catalog in the data store.
-     */
-    DsUpsertTableOp kv_create_index_op_;
     /**
      * @brief Update the sequence table for range id info.
      */
@@ -160,8 +176,19 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     DsUpsertTableOp kv_rollback_create_index_op_;
     /**
-     * @brief For creating index, update the schema image inside kv-storage.
-     * Optional operation.
+     * @brief For creating index, writes the new schema (with the indexes'
+     * multikey attributes) to the kv catalog at the commit stage, after the
+     * commit log and under the commit-stage write lock.
+     *
+     * The index's kv table exists since before the prepare log
+     * (create_kv_table_op_), and until the commit log the prepare log carries
+     * the dirty schema for any node that recovers. Written at the op's
+     * timestamp, so the kv catalog version matches the in-memory schema
+     * version; retried until it succeeds, since after the commit log the op
+     * only rolls forward. The write lock keeps any later DDL on the table from
+     * writing its catalog row first: the DSS RocksDB backends apply writes in
+     * arrival order, not by version, and a later drop table deletes the row,
+     * leaving nothing a late write could be compared against.
      */
     DsUpsertTableOp kv_update_schema_image_op_;
     /**
@@ -192,6 +219,20 @@ struct UpsertTableIndexOp : public SchemaOp
     };
     bool is_last_finished_key_str_;
 
+    /**
+     * @brief Whether the ADD INDEX was rolled back: its build broke a
+     * constraint after the prepare log.
+     *
+     * The op still commits, at its commit-stage timestamp, and the commit log
+     * carries this mark instead of the zero commit timestamp that used to mean
+     * the same: the index's kv tables are dropped, the catalog row keeps the
+     * table's current schema at the commit timestamp, and the second phase, a
+     * Rollback at that timestamp, drops the index's cc maps and keeps the
+     * current schema instead of promoting the dirty one. Recovery reads it
+     * from the commit log.
+     */
+    bool rolled_back_{false};
+
 public:
     void RecoveryIndexesMultiKeyAttr(const TableSchema *dirty_schema);
 
@@ -200,6 +241,81 @@ private:
     void FillPrepareDataLogRequest(TransactionExecution *txm);
     void FillCommitLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
+
+    /**
+     * @brief Starts create_kv_table_op_, which creates the kv table of each
+     * index being added.
+     *
+     * Called once `commit_ts_` is chosen under the prepare-stage write lock,
+     * before the prepare log.
+     *
+     * @param txm The transaction running this operation.
+     */
+    void CreateKvTables(TransactionExecution *txm);
+
+    /**
+     * @brief Starts drop_kv_table_op_, which drops the kv tables of the
+     * indexes being added, and then releases the locks.
+     *
+     * Called when the add index fails before its prepare log is flushed.
+     *
+     * @param txm The transaction running this operation.
+     */
+    void DropKvTables(TransactionExecution *txm);
+
+    /**
+     * @brief Writes the prepare log, once `commit_ts_` is chosen and, for add
+     * index, the kv tables exist.
+     *
+     * @param txm The transaction running this operation.
+     */
+    void WritePrepareLog(TransactionExecution *txm);
+
+    /**
+     * @brief Marks the op failed: commit timestamp 0, and a Rollback second
+     * phase that discards whatever dirty schema the op installed and leaves
+     * the catalog entry's version alone.
+     *
+     * @param txm The coordinating tx.
+     */
+    void MarkFailed(TransactionExecution *txm);
+
+    /**
+     * @brief Runs a data store step that failed after the prepare log again,
+     * KvRetryInterval() later (ArmKvRetryWait); ends the op if the node is no
+     * longer the leader.
+     *
+     * A failure before the prepare log (create_kv_table_op_) is not retried:
+     * the op fails.
+     *
+     * @param txm The coordinating tx.
+     * @param step The step to run again: update_sequence_table_op_,
+     * flush_all_old_tuples_sk_op_, kv_drop_index_op_,
+     * kv_rollback_create_index_op_ or kv_update_schema_image_op_.
+     */
+    void RetryKvStep(TransactionExecution *txm, TransactionOperation *step);
+
+    /**
+     * @brief Fault-injection hold (alter_table_index_hold_before_commit_lock):
+     * keeps an add index whose build has finished, after its last prepare data
+     * log, from taking its commit-stage write locks until the test disarms the
+     * hold, or for hold_s seconds (the fault's parameter "hold_s=N", 60 by
+     * default), still holding the cluster config read lock it took first.
+     * Arms the alter_table_index_held_before_commit_lock marker while it
+     * holds, so a test can tell the op got there.
+     *
+     * The wait is kv_retry_wait_op_'s blocking work on a worker thread, and
+     * the op's kv_retry_wait_op_ stage then runs acquire_all_lock_op_, so the
+     * TxProcessor keeps serving other requests meanwhile. Only fault-injection
+     * builds call it.
+     *
+     * @warning While the fault is armed it holds every add index of any table
+     * that finishes its build. A test arms it only around the one build it
+     * means to hold and disarms it in a finally.
+     *
+     * @param txm The coordinating tx.
+     */
+    void HoldBeforeCommitLock(TransactionExecution *txm);
 
     // Flush pk or sk data from ccmap into data store.
     void FlushDataIntoDataStore(const TableName &table_name,
@@ -249,9 +365,6 @@ private:
     static bool IndexesMergeMultiKeyAttr(std::vector<MultiKeyAttr> &from,
                                          std::vector<MultiKeyAttr> &to);
 
-    static bool AnyMultiKeyIndex(
-        const std::vector<MultiKeyAttr> &indexes_multikey_attr);
-
     static std::string RebuildSchemaImage(
         const TableSchema *dirty_schema,
         const std::vector<MultiKeyAttr> &indexes_multikey_attr);
@@ -272,6 +385,12 @@ private:
     // Due to term or other error, called ForceToFinish to terminate this
     // operation
     bool is_force_finished_{false};
+
+    /**
+     * The cluster gate refused the op at its first step: it holds nothing but
+     * the cluster config read lock, releases it and ends without a log.
+     */
+    bool gated_{false};
 
 #ifdef NDEBUG
     static constexpr uint8_t scan_batch_range_size_{10};

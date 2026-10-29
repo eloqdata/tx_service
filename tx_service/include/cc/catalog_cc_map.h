@@ -165,15 +165,16 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
+        // Kills the node (*_panic) or stalls it for 10 seconds (*_sleep) during
+        // a schema op's PrepareCommit, or during the Rollback of a failed one.
         CODE_FAULT_INJECTOR("during_post_write_all", {
             std::string &action = FaultInject::Instance()
                                       .Entry("during_post_write_all")
                                       ->vctAction_.front();
             if ((req.CommitType() == PostWriteType::PrepareCommit &&
                  action == "prepare_commit_panic") ||
-                (req.CommitType() == PostWriteType::PostCommit &&
-                 req.CommitTs() == TransactionOperation::tx_op_failed_ts_ &&
-                 action == "post_commit_panic"))
+                (req.CommitType() == PostWriteType::Rollback &&
+                 action == "rollback_panic"))
             {
                 int retval;
                 sigset_t new_mask;
@@ -191,10 +192,8 @@ public:
             }
             else if ((req.CommitType() == PostWriteType::PrepareCommit &&
                       action == "prepare_commit_sleep") ||
-                     (req.CommitType() == PostWriteType::PostCommit &&
-                      req.CommitTs() ==
-                          TransactionOperation::tx_op_failed_ts_ &&
-                      action == "post_commit_sleep"))
+                     (req.CommitType() == PostWriteType::Rollback &&
+                      action == "rollback_sleep"))
             {
                 LOG(INFO) << "sleep 10 seconds: ";
                 sleep(10);
@@ -260,17 +259,16 @@ public:
         if (cce_ptr == nullptr || cce_ptr->GetKeyLock() == nullptr ||
             !cce_ptr->GetKeyLock()->HasWriteLockOrWriteIntent(req.Txn()))
         {
-            // When the catalog entry is null in the post-write-all
-            // phase, it means that (1) the cc req is a resend request and
-            // previous has successed, (2) the cc node group must have failed
-            // over once, and (3) there is no catalog op in the log (so that the
-            // recovered cc node group has no catalog entry). No catalog op in
-            // the log means that this schema op fails before the prepare log
-            // and this post-write-all request is to release the write
-            // lock/intent. Given that the cc node group has failed once, the
-            // previously acquired intent/lock has gone. There is no need to
-            // proceed to release the intent/lock. The request is set to
-            // finished.
+            // The tx holds no lock on the entry here, so the post write has
+            // nothing left to do and finishes. That is the case when (1) the
+            // request is a resend whose first copy succeeded; (2) the node
+            // group failed over while the schema op had no log yet, so the
+            // op failed before its prepare log and the request only releases
+            // an intent or lock the failover already dropped; or (3) the node
+            // group, a participant, recovered from the op's commit log, which
+            // installs the committed schema and restores no lock there. Only
+            // the coordinator's node group restores one, see
+            // Execute(ReplayLogCc&).
             if (shard_->core_id_ == shard_->core_cnt_ - 1)
             {
                 req.Result()->SetFinished();
@@ -285,859 +283,25 @@ public:
             }
         }
 
-        CatalogRecord *schema_rec = nullptr;
-        CatalogEntry *catalog_entry = nullptr;
-
-        // First setup the schema_rec that will replace the current catalog rec.
         switch (req.CommitType())
         {
         case PostWriteType::PrepareCommit:
-        {
-            if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
-            {
-                // When the commit ts is 0, the request commits nothing and only
-                // removes the write intents/locks acquired earlier.
-                return TemplateCcMap::Execute(req);
-            }
-
-            if (shard_->core_id_ == 0)
-            {
-                // For prepare commit or commit, instantiates the dirty schema
-                // instance in LocalCcShards when processing the request at the
-                // first shard/core.
-
-                if (req.Payload() != nullptr)
-                {
-                    // When the request comes from a tx in the same node, the
-                    // request references a schema record in the tx's space.
-                    schema_rec = static_cast<CatalogRecord *>(req.Payload());
-                }
-                else
-                {
-                    // When the request comes from a remote tx, the request
-                    // contains a serialized representation of the catalog, but
-                    // not a reference of a schema record. Allocates a schema
-                    // record.
-                    assert(req.PayloadStr() != nullptr);
-                    std::unique_ptr<CatalogRecord> decoded_rec =
-                        std::make_unique<CatalogRecord>();
-                    if (req.OpType() != OperationType::DropTable)
-                    {
-                        size_t offset = 0;
-                        decoded_rec->Deserialize(req.PayloadStr()->data(),
-                                                 offset);
-                    }
-                    schema_rec = decoded_rec.get();
-                    req.SetDecodedPayload(std::move(decoded_rec));
-                }
-
-                catalog_entry =
-                    shard_->CreateDirtyCatalog(table_key->Name(),
-                                               req.NodeGroupId(),
-                                               schema_rec->DirtySchemaImage(),
-                                               req.CommitTs());
-
-                // For alter index, we need to initialize meta data for the
-                // new indexes at prepare stage since the new indexes may
-                // receive cc requests during the 2 phase commit DDL tx..
-                if ((req.OpType() == OperationType::AddIndex ||
-                     req.OpType() == OperationType::DropIndex))
-                {
-                    if (catalog_entry->schema_ == nullptr)
-                    {
-                        // For alter table, in some case, the current schema may
-                        // not exists yet, so should create the current schema.
-                        // For example, this node is the participant node of the
-                        // alter table transaction, and does not execute any
-                        // transaction about this table before this alter table
-                        // tx since server start.
-                        shard_->FetchCatalog(table_key->Name(),
-                                             req.NodeGroupId(),
-                                             ng_term,
-                                             &req);
-                        return false;
-                    }
-
-                    if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
-                            nullptr &&
-                        !table_key->Name().IsHashPartitioned() &&
-                        !shard_->LoadRangesAndStatisticsNx(
-                            catalog_entry->schema_.get(),
-                            req.NodeGroupId(),
-                            ng_term,
-                            &req))
-                    {
-                        return false;
-                    }
-
-                    // Bind statistics for the dirty schema.
-                    catalog_entry->dirty_schema_->BindStatistics(
-                        catalog_entry->schema_->StatisticsObject());
-                    if (req.OpType() == OperationType::AddIndex)
-                    {
-                        // For ALTER TABLE, set the dirty index name, and this
-                        // info should be clean when commit dirty schema. For
-                        // CREATE TABLE, there is no matter that do not set the
-                        // dirty index info, because this table is invisible
-                        // until create table transaction commit.
-                        auto new_index_names =
-                            catalog_entry->dirty_schema_->IndexNames();
-                        auto old_index_names =
-                            catalog_entry->schema_->IndexNames();
-                        std::vector<TableName> dirty_index_names;
-                        for (const TableName &new_index_name : new_index_names)
-                        {
-                            if (std::find(old_index_names.begin(),
-                                          old_index_names.end(),
-                                          new_index_name) ==
-                                old_index_names.end())
-                            {
-                                dirty_index_names.emplace_back(
-                                    new_index_name.StringView(),
-                                    new_index_name.Type(),
-                                    new_index_name.Engine());
-                            }
-                        }
-
-                        // Load ranges for the new added indexes. We cannot
-                        // simply initialize it with empty range table since we
-                        // might have pre-defined range table based on the data
-                        // distribution offered by caller.
-                        for (const TableName &index_name : dirty_index_names)
-                        {
-                            TableName index_range_name{
-                                index_name.StringView(),
-                                TableType::RangePartition,
-                                index_name.Engine()};
-
-                            auto ranges = shard_->GetTableRangesForATable(
-                                index_range_name, req.NodeGroupId());
-                            if (ranges == nullptr)
-                            {
-                                shard_->FetchTableRanges(index_range_name,
-                                                         &req,
-                                                         req.NodeGroupId(),
-                                                         ng_term);
-                                return false;
-                            }
-
-                            for (auto &range : *ranges)
-                            {
-                                range.second->SetVersion(req.CommitTs());
-                                NodeGroupId range_owner =
-                                    shard_
-                                        ->GetRangeOwner(
-                                            range.second->GetRangeInfo()
-                                                ->PartitionId(),
-                                            req.NodeGroupId())
-                                        ->BucketOwner();
-                                if (range_owner == req.NodeGroupId() &&
-                                    range.second->RangeSlices() == nullptr)
-                                {
-                                    // The owner this this range, and this is a
-                                    // empty range.
-
-                                    std::unique_lock<std::mutex> heap_lk(
-                                        shard_->local_shards_
-                                            .table_ranges_heap_mux_);
-                                    bool is_override_thd =
-                                        mi_is_override_thread();
-                                    mi_threadid_t prev_thd = mi_override_thread(
-                                        shard_->local_shards_
-                                            .GetTableRangesHeapThreadId());
-                                    mi_heap_t *prev_heap = mi_heap_set_default(
-                                        shard_->local_shards_
-                                            .GetTableRangesHeap());
-
-#if defined(WITH_JEMALLOC)
-                                    uint32_t prev_arena;
-                                    JemallocArenaSwitcher::ReadCurrentArena(
-                                        prev_arena);
-                                    auto table_range_arena_id =
-                                        shard_->local_shards_
-                                            .GetTableRangesArenaId();
-                                    JemallocArenaSwitcher::SwitchToArena(
-                                        table_range_arena_id);
-#endif
-
-                                    std::vector<SliceInitInfo> slices;
-                                    range.second->InitRangeSlices(
-                                        std::move(slices),
-                                        req.NodeGroupId(),
-                                        false,
-                                        true,
-                                        UINT64_MAX,
-                                        false);
-
-                                    mi_heap_set_default(prev_heap);
-                                    if (is_override_thd)
-                                    {
-                                        mi_override_thread(prev_thd);
-                                    }
-                                    else
-                                    {
-                                        mi_restore_default_thread_id();
-                                    }
-
-#if defined(WITH_JEMALLOC)
-                                    JemallocArenaSwitcher::SwitchToArena(
-                                        prev_arena);
-
-#endif
-                                    heap_lk.unlock();
-                                }
-                            }
-                        }
-
-                        for (const TableName &index_name : dirty_index_names)
-                        {
-                            catalog_entry->schema_->StatisticsObject()
-                                ->CreateIndex(index_name,
-                                              catalog_entry->dirty_schema_
-                                                  ->IndexKeySchema(index_name),
-                                              cc_ng_id_);
-                        }
-                    }
-                }
-
-                schema_rec->Set(catalog_entry->schema_,
-                                catalog_entry->dirty_schema_,
-                                catalog_entry->schema_version_);
-            }
-            else
-            {
-                assert(req.Payload() != nullptr);
-                schema_rec = static_cast<CatalogRecord *>(req.Payload());
-                catalog_entry =
-                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
-
-                if (catalog_entry == nullptr)
-                {
-                    // The table catalog haven't been initialized. Just return.
-                    req.Result()->SetError(
-                        CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                    return true;
-                }
-            }
-
-            break;
-        }
+            return PrepareCommitSchema(req, *table_key, ng_term);
         case PostWriteType::UpdateDirty:
-        {
-            assert(req.OpType() == OperationType::AddIndex);
-            assert(req.CommitTs() != TransactionOperation::tx_op_failed_ts_);
-            if (shard_->core_id_ == 0)
-            {
-                // For update dirty, retrieves the current and dirty schema pair
-                // from the current shard.
-                if (req.Payload() != nullptr)
-                {
-                    // When the request comes from a tx in the same node, the
-                    // request references a schema record in the tx's space.
-                    schema_rec = static_cast<CatalogRecord *>(req.Payload());
-                }
-                else
-                {
-                    assert(req.PayloadStr() != nullptr);
-                    // When the request comes from a remote tx, allocates a
-                    // schema record, which acts as a container referencing the
-                    // current and dirty schema pair.
-                    std::unique_ptr<CatalogRecord> decoded_rec =
-                        std::make_unique<CatalogRecord>();
-                    size_t offset = 0;
-                    decoded_rec->Deserialize(req.PayloadStr()->data(), offset);
-
-                    schema_rec = decoded_rec.get();
-                    req.SetDecodedPayload(std::move(decoded_rec));
-                }
-
-                catalog_entry =
-                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
-
-                if (catalog_entry == nullptr)
-                {
-                    // The target table catalog haven't been initialized. Just
-                    // return.
-                    req.Result()->SetError(
-                        CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                    return true;
-                }
-
-                if (catalog_entry->dirty_schema_->SchemaImage() !=
-                    schema_rec->DirtySchemaImage())
-                {
-                    assert(catalog_entry->dirty_schema_version_ ==
-                           req.CommitTs());
-                    std::shared_ptr<TableSchema> old_dirty_schema =
-                        catalog_entry->dirty_schema_;
-                    shard_->UpdateDirtyCatalog(table_key->Name(),
-                                               schema_rec->DirtySchemaImage(),
-                                               catalog_entry);
-                    catalog_entry->dirty_schema_->BindStatistics(
-                        old_dirty_schema->StatisticsObject());
-                }
-
-                schema_rec->Set(catalog_entry->schema_,
-                                catalog_entry->dirty_schema_,
-                                catalog_entry->schema_version_);
-            }
-            else
-            {
-                assert(req.Payload() != nullptr);
-                schema_rec = static_cast<CatalogRecord *>(req.Payload());
-                catalog_entry =
-                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
-
-                if (catalog_entry == nullptr)
-                {
-                    // The table catalog haven't been initialized. Just return.
-                    req.Result()->SetError(
-                        CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                    return true;
-                }
-            }
-            break;
-        }
+            return UpdateDirtySchema(req, *table_key);
         case PostWriteType::PostCommit:
-        {
-            if (shard_->IsNative(req.NodeGroupId()))
-            {
-                const TableName &tbl_name = table_key->Name();
-                std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
-                    shard_->FindSchemaCntl(tbl_name);
-                if (schema_cntl != nullptr)
-                {
-                    schema_cntl->FinishWriter(req.Txn());
-                    shard_->DeleteSchemaCntl(tbl_name);
-                }
-            }
-
-            catalog_entry =
-                shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
-
-            if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
-            {
-                // The catalog_entry could be null if the txn aborts after
-                // acquire write intent failure.
-
-                // For add index op, we create new sk ccmap, table ranges and
-                // table statistics for the new sk during prepare phase. If
-                // flush kv failed, should clean these up. But, if the dirty
-                // schema is nullptr, that is mean, this is the recovering
-                // transaction, and there is no need to drop the new sk ccmap.
-                if (req.OpType() == OperationType::AddIndex &&
-                    catalog_entry != nullptr &&
-                    catalog_entry->dirty_schema_ != nullptr)
-                {
-                    std::vector<TableName> new_index_names =
-                        catalog_entry->dirty_schema_->IndexNames();
-                    std::vector<TableName> old_index_names =
-                        catalog_entry->schema_->IndexNames();
-                    for (const TableName &new_index_name : new_index_names)
-                    {
-                        if (std::find(old_index_names.begin(),
-                                      old_index_names.end(),
-                                      new_index_name) == old_index_names.end())
-                        {
-                            shard_->DropCcm(new_index_name, req.NodeGroupId());
-                            // Clean up table ranges for new sk.
-                            const TableName index_range_name{
-                                new_index_name.StringView(),
-                                TableType::RangePartition,
-                                new_index_name.Engine()};
-                            shard_->DropCcm(index_range_name,
-                                            req.NodeGroupId());
-                            if (shard_->core_id_ == shard_->core_cnt_ - 1)
-                            {
-                                shard_->CleanTableRange(index_range_name,
-                                                        req.NodeGroupId());
-                                Statistics *statistics =
-                                    catalog_entry->dirty_schema_
-                                        ->StatisticsObject()
-                                        .get();
-                                statistics->DropIndex(new_index_name);
-                            }
-                        }
-                    }
-                }
-
-                // Flush kv fails, need to clear dirty CatalogEntry
-                if (shard_->core_id_ == shard_->core_cnt_ - 1 &&
-                    catalog_entry != nullptr)
-                {
-                    catalog_entry->RejectDirtySchema();
-                }
-
-                if (cce_ptr->payload_.cur_payload_)
-                {
-                    cce_ptr->payload_.cur_payload_->ClearDirtySchema();
-                    cce_ptr->payload_.cur_payload_->SetDirtySchemaImage("");
-                }
-                return TemplateCcMap::Execute(req);
-            }
-
-            assert(catalog_entry != nullptr);
-            if (shard_->core_id_ == 0)
-            {
-                // For post commit, retrieves the current and dirty schema pair
-                // from the current shard.
-                if (req.Payload() != nullptr)
-                {
-                    // When the request comes from a tx in the same node, the
-                    // request references a schema record in the tx's space.
-                    schema_rec = static_cast<CatalogRecord *>(req.Payload());
-                }
-                else
-                {
-                    assert(req.PayloadStr() != nullptr);
-                    // When the request comes from a remote tx, allocates a
-                    // schema record, which acts as a container referencing the
-                    // current and dirty schema pair.
-                    std::unique_ptr<CatalogRecord> decoded_rec =
-                        std::make_unique<CatalogRecord>();
-                    if (req.OpType() != OperationType::DropTable)
-                    {
-                        size_t offset = 0;
-                        decoded_rec->Deserialize(req.PayloadStr()->data(),
-                                                 offset);
-                    }
-
-                    schema_rec = decoded_rec.get();
-                    req.SetDecodedPayload(std::move(decoded_rec));
-                }
-
-                if (req.OpType() == OperationType::CreateTable)
-                {
-                    std::vector<InitRangeEntry> range_init_vec;
-                    std::string_view table_name_view =
-                        table_key->Name().StringView();
-                    int init_partition_id = 0;
-                    if (table_name_view != "./mysql/sequences")
-                    {
-                        size_t tbl_name_hash =
-                            std::hash<std::string_view>()(table_name_view);
-                        init_partition_id = tbl_name_hash & 0xFFF;
-                    }
-
-                    // Use nullptr to represent negative infinity key here.
-                    range_init_vec.emplace_back(
-                        TxKey(), init_partition_id, req.CommitTs());
-
-                    TableName range_table_name(table_name_view,
-                                               TableType::RangePartition,
-                                               table_key->Name().Engine());
-                    shard_->local_shards_.InitTableRanges(range_table_name,
-                                                          range_init_vec,
-                                                          req.NodeGroupId(),
-                                                          true);
-
-                    std::vector<TableName> index_names =
-                        catalog_entry->dirty_schema_->IndexNames();
-                    for (const TableName &index_name : index_names)
-                    {
-                        // Create range table for each sk index
-                        TableName index_range_table_name{
-                            index_name.StringView(),
-                            TableType::RangePartition,
-                            index_name.Engine()};
-
-                        size_t tbl_name_hash = std::hash<std::string_view>()(
-                            index_name.StringView());
-                        init_partition_id = tbl_name_hash & 0xFFF;
-                        range_init_vec.clear();
-                        range_init_vec.emplace_back(
-                            TxKey(), init_partition_id, req.CommitTs());
-                        shard_->local_shards_.InitTableRanges(
-                            index_range_table_name,
-                            range_init_vec,
-                            req.NodeGroupId(),
-                            true);
-                    }
-                    shard_->InitTableStatistics(
-                        catalog_entry->dirty_schema_.get(), cc_ng_id_);
-                }
-                else if (req.OpType() == OperationType::Update)
-                {
-                    assert(catalog_entry->schema_->StatisticsObject());
-                    catalog_entry->dirty_schema_->BindStatistics(
-                        catalog_entry->schema_->StatisticsObject());
-                }
-
-                // If recoverring from commit log, there is no dirty schema,
-                // skip updating schema_rec
-                if (catalog_entry->dirty_schema_ != nullptr)
-                {
-                    schema_rec->Set(catalog_entry->dirty_schema_,
-                                    nullptr,
-                                    catalog_entry->dirty_schema_version_);
-                }
-            }
-            else
-            {
-                assert(req.Payload() != nullptr);
-                schema_rec = static_cast<CatalogRecord *>(req.Payload());
-            }
-            break;
-        }
-        case PostWriteType::Commit:
-        {
-            // Schema operations always employ multi-stage commits.
-            assert(true);
-            break;
-        }
+            return PostCommitSchema(req, *table_key, *cce_ptr, ng_term);
+        case PostWriteType::Rollback:
+            return RollBackSchema(req, *table_key);
         case PostWriteType::DowngradeLock:
-        {
-            // the request commits nothing and only downgrade the write
-            // locks to write intent.
+            // The request commits nothing and only downgrades the write locks
+            // to write intents.
+            return TemplateCcMap::Execute(req);
+        default:
+            // Schema operations always employ multi-stage commits.
+            assert(false);
             return TemplateCcMap::Execute(req);
         }
-        default:
-            break;
-        }
-
-        assert(catalog_entry != nullptr);
-
-        // When the request commits the schema operation, modifies the cc
-        // map(s) at this shard.
-        const TableSchema *old_schema = catalog_entry->schema_.get();
-        const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
-        if (req.CommitType() == PostWriteType::PostCommit &&
-            catalog_entry->dirty_schema_version_ > 0)
-        {
-            if (req.OpType() == OperationType::TruncateTable)
-            {
-                assert(table_key->Name().Engine() == TableEngine::EloqKv);
-                // A remote tx is allowed to acquire write intents/locks and
-                // drop a table, even if the table's schema has not been
-                // initialized at this node. The earlier acquiring-write-intent
-                // request creates a schema cc entry in the catalog cc map and a
-                // node-level schema view. The version timestamp of the schema
-                // is 0, if the schema is uninitialized (null). Or, the current
-                // schema must not be null.
-
-                assert(catalog_entry->schema_version_ == 0 ||
-                       old_schema != nullptr);
-                assert(new_schema->Version() ==
-                       catalog_entry->dirty_schema_version_);
-
-                shard_->UpdateCcmSchema(table_key->Name(),
-                                        req.NodeGroupId(),
-                                        catalog_entry->dirty_schema_.get(),
-                                        catalog_entry->dirty_schema_version_);
-
-                // Sync ddl op to standby nodes.
-                if (shard_->core_id_ == 0 &&
-                    !shard_->GetSubscribedStandbys().empty())
-                {
-                    auto forward_entry_ptr =
-                        std::make_unique<StandbyForwardEntry>();
-                    StandbyForwardEntry *forward_entry =
-                        forward_entry_ptr.get();
-                    auto *forward_req = &forward_entry->Request();
-                    forward_req->set_primary_leader_term(ng_term);
-                    forward_req->set_tx_number(req.Txn());
-                    forward_req->set_table_name(table_name_.String());
-                    forward_req->set_table_type(
-                        remote::ToRemoteType::ConvertTableType(
-                            table_name_.Type()));
-                    forward_req->set_table_engine(
-                        remote::ToRemoteType::ConvertTableEngine(
-                            table_name_.Engine()));
-                    forward_req->set_key_shard_code(cc_ng_id_ << 10);
-                    std::string key_str;
-                    table_key->Serialize(key_str);
-                    forward_req->set_key(std::move(key_str));
-                    std::string rec_str;
-
-                    assert(catalog_entry->schema_ != nullptr);
-                    assert(catalog_entry->dirty_schema_ != nullptr);
-                    assert(catalog_entry->dirty_schema_version_ > 0);
-
-                    CatalogRecord temp_rec;
-                    temp_rec.SetSchemaImage(
-                        catalog_entry->schema_->SchemaImage());
-                    temp_rec.SetDirtySchemaImage(
-                        catalog_entry->dirty_schema_->SchemaImage());
-                    assert(!temp_rec.SchemaImage().empty());
-                    assert(!temp_rec.DirtySchemaImage().empty());
-
-                    temp_rec.Serialize(rec_str);
-                    forward_req->add_cmd_list(std::move(rec_str));
-
-                    forward_req->set_commit_ts(
-                        catalog_entry->dirty_schema_version_);
-                    forward_req->set_schema_version(
-                        catalog_entry->schema_version_);
-                    shard_->ForwardStandbyMessage(forward_entry_ptr.release());
-                }
-            }
-            else if (req.OpType() == OperationType::DropTable)
-            {
-                // A remote tx is allowed to acquire write intents/locks and
-                // drop a table, even if the table's schema has not been
-                // initialized at this node. The earlier acquiring-write-intent
-                // request creates a schema cc entry in the catalog cc map and a
-                // node-level schema view. The version timestamp of the schema
-                // is 0, if the schema is uninitialized (null). Or, the current
-                // schema must not be null.
-                assert(catalog_entry->schema_version_ == 0 ||
-                       old_schema != nullptr);
-
-                // This is a DROP TABLE statement. Drops the cc maps
-                // associated with the table in the final commit step.
-                shard_->DropCcm(table_key->Name(), req.NodeGroupId());
-
-                if (!table_key->Name().IsHashPartitioned())
-                {
-                    // Drop range table if exist
-                    TableName range_table_name{table_key->Name().StringView(),
-                                               TableType::RangePartition,
-                                               table_key->Name().Engine()};
-                    shard_->DropCcm(range_table_name, req.NodeGroupId());
-                }
-
-                if (old_schema != nullptr)
-                {
-                    std::vector<TableName> index_names =
-                        old_schema->IndexNames();
-                    for (const TableName &index_name : index_names)
-                    {
-                        shard_->DropCcm(index_name, req.NodeGroupId());
-                        // Drop range table if exist
-                        TableName index_range_table_name{
-                            index_name.StringView(),
-                            TableType::RangePartition,
-                            index_name.Engine()};
-                        shard_->DropCcm(index_range_table_name,
-                                        req.NodeGroupId());
-                    }
-                }
-            }
-            else if (req.OpType() == OperationType::CreateTable)
-            {
-                assert(catalog_entry->dirty_schema_version_ > 0 &&
-                       new_schema != nullptr);
-
-                // This is a CREATE TABLE statement. Creates the cc maps
-                // associated with the table in the final commit step.
-                shard_->CreateOrUpdatePkCcMap(table_key->Name(),
-                                              new_schema,
-                                              req.NodeGroupId(),
-                                              true,
-                                              true);
-
-                std::vector<TableName> index_names = new_schema->IndexNames();
-                for (const TableName &index_name : index_names)
-                {
-                    shard_->CreateOrUpdateSkCcMap(
-                        index_name, new_schema, req.NodeGroupId());
-                }
-            }
-            // Alter Table
-            else
-            {
-                assert(old_schema != nullptr && new_schema != nullptr);
-                // Update pk cc map using new schema.
-                shard_->CreateOrUpdatePkCcMap(
-                    table_key->Name(), new_schema, req.NodeGroupId(), false);
-
-                if (!table_key->Name().IsHashPartitioned())
-                {
-                    // Update pk range table if exist.
-                    TableName base_range_table_name{
-                        table_key->Name().StringView(),
-                        TableType::RangePartition,
-                        table_key->Name().Engine()};
-                    auto ranges = shard_->GetTableRangesForATable(
-                        base_range_table_name, req.NodeGroupId());
-                    if (ranges != nullptr)
-                    {
-                        shard_->CreateOrUpdateRangeCcMap(
-                            base_range_table_name,
-                            new_schema,
-                            req.NodeGroupId(),
-                            catalog_entry->dirty_schema_version_,
-                            false);
-                    }
-                }
-
-                if (req.OpType() == OperationType::AddIndex ||
-                    req.OpType() == OperationType::DropIndex ||
-                    req.OpType() == OperationType::Update)
-                {
-                    std::vector<TableName> new_index_names =
-                        new_schema->IndexNames();
-                    std::vector<TableName> old_index_names =
-                        old_schema->IndexNames();
-
-                    for (const TableName &old_index_name : old_index_names)
-                    {
-                        if (std::find(new_index_names.begin(),
-                                      new_index_names.end(),
-                                      old_index_name) != new_index_names.end())
-                        {
-                            // Update current sk cc map using new schema.
-                            shard_->CreateOrUpdateSkCcMap(old_index_name,
-                                                          new_schema,
-                                                          req.NodeGroupId(),
-                                                          false);
-                            // Update current sk range table if exist.
-                            TableName index_range_table_name{
-                                old_index_name.StringView(),
-                                TableType::RangePartition,
-                                old_index_name.Engine()};
-                            auto ranges = shard_->GetTableRangesForATable(
-                                index_range_table_name, req.NodeGroupId());
-                            if (ranges != nullptr)
-                            {
-                                shard_->CreateOrUpdateRangeCcMap(
-                                    index_range_table_name,
-                                    new_schema,
-                                    req.NodeGroupId(),
-                                    catalog_entry->dirty_schema_version_,
-                                    false);
-                            }
-                        }
-                        else
-                        {
-                            assert(req.OpType() == OperationType::DropIndex);
-                            // Remove sk cc map for dropped index.
-                            shard_->DropCcm(old_index_name, req.NodeGroupId());
-
-                            // range table operation.
-                            // Drop range table if exist
-                            TableName old_index_range_table_name{
-                                old_index_name.StringView(),
-                                TableType::RangePartition,
-                                old_index_name.Engine()};
-                            shard_->DropCcm(old_index_range_table_name,
-                                            req.NodeGroupId());
-                        }
-                    }
-                }  // End of alter table index
-            }
-
-            UpdateTableLocks(table_key->Name().StringView(),
-                             catalog_entry->dirty_schema_version_,
-                             cce_ptr->GetKeyLock());
-        }
-        else if ((req.CommitType() == PostWriteType::PrepareCommit ||
-                  req.CommitType() == PostWriteType::UpdateDirty) &&
-                 catalog_entry->dirty_schema_version_ > 0)
-        {
-            // Prepare commit. For certain schema operations, e.g., create
-            // secondary index, the cc map is modified in the prepare commit
-            // step.
-            // ALTER TABLE statement (include CREATE/DROP INDEX)
-            if (req.OpType() == OperationType::AddIndex)
-            {
-                std::vector<TableName> new_index_names =
-                    new_schema->IndexNames();
-                std::vector<TableName> old_index_names =
-                    old_schema->IndexNames();
-                bool found = false;
-                for (const TableName &new_index_name : new_index_names)
-                {
-                    found = false;
-                    for (const auto &old_index_name : old_index_names)
-                    {
-                        if (!new_index_name.String().compare(
-                                old_index_name.String()))
-                        {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found)
-                    {
-                        // In this step, just create cc map for new sk.
-                        // We will update current sk ccmap in PostCommit.
-                        bool is_create =
-                            req.CommitType() == PostWriteType::PrepareCommit;
-                        shard_->CreateOrUpdateSkCcMap(new_index_name,
-                                                      new_schema,
-                                                      req.NodeGroupId(),
-                                                      is_create);
-
-                        // New sk range cc map should use the dirty schema
-                        const TableName new_index_range_name{
-                            new_index_name.StringView(),
-                            TableType::RangePartition,
-                            new_index_name.Engine()};
-                        shard_->CreateOrUpdateRangeCcMap(
-                            new_index_range_name,
-                            new_schema,
-                            req.NodeGroupId(),
-                            catalog_entry->dirty_schema_version_,
-                            is_create);
-                    }
-                }
-            }
-        }
-
-        if (req.CommitType() == PostWriteType::PostCommit &&
-            shard_->core_id_ == shard_->core_cnt_ - 1 &&
-            catalog_entry->dirty_schema_version_ > 0)
-        {
-            // If this is a drop table req, drop the range table also
-            // Drop table range before drop catalog
-            if (req.OpType() == OperationType::DropTable)
-            {
-                shard_->CleanTableStatistics(table_key->Name(), cc_ng_id_);
-                if (!table_key->Name().IsHashPartitioned())
-                {
-                    TableName range_table_name{table_key->Name().StringView(),
-                                               TableType::RangePartition,
-                                               table_key->Name().Engine()};
-                    shard_->CleanTableRange(range_table_name,
-                                            req.NodeGroupId());
-                    if (old_schema != nullptr)
-                    {
-                        std::vector<TableName> index_names =
-                            old_schema->IndexNames();
-                        for (const TableName &index_name : index_names)
-                        {
-                            // Drop range table if exist
-                            TableName index_range_table_name{
-                                index_name.StringView(),
-                                TableType::RangePartition,
-                                index_name.Engine()};
-                            shard_->CleanTableRange(index_range_table_name,
-                                                    req.NodeGroupId());
-                        }
-                    }
-                }
-            }
-            else if (req.OpType() == OperationType::AddIndex ||
-                     req.OpType() == OperationType::DropIndex)
-            {
-                std::vector<TableName> new_index_names =
-                    new_schema->IndexNames();
-                std::vector<TableName> old_index_names =
-                    old_schema->IndexNames();
-                for (const TableName &old_index_name : old_index_names)
-                {
-                    // Drop old index range table if not exist any more
-                    if (std::find(new_index_names.begin(),
-                                  new_index_names.end(),
-                                  old_index_name) == new_index_names.end())
-                    {
-                        TableName old_index_range_table_name{
-                            old_index_name.StringView(),
-                            TableType::RangePartition,
-                            old_index_name.Engine()};
-                        shard_->CleanTableRange(old_index_range_table_name,
-                                                req.NodeGroupId());
-                        Statistics *statistics =
-                            old_schema->StatisticsObject().get();
-                        statistics->DropIndex(old_index_name);
-                    }
-                }
-            }
-            catalog_entry->CommitDirtySchema();
-        }
-
-        return TemplateCcMap::Execute(req);
     }
 
     bool Execute(ReadCc &req) override
@@ -1386,6 +550,12 @@ public:
 
                 uint64_t dirty_schema_commit_ts = req.CommitTs();
                 uint64_t old_schema_commit_ts = schema_op_msg.catalog_ts();
+                // A rolled-back add index commits at a real timestamp: the
+                // table keeps its current schema, at that timestamp.
+                const bool rolled_back = schema_op_msg.rolled_back();
+                const std::string &committed_blob =
+                    rolled_back ? schema_op_msg.old_catalog_blob()
+                                : schema_op_msg.new_catalog_blob();
 
                 // upsert kv store first, then create catalog entry
                 if (need_to_upsert_kv_table && dirty_schema_commit_ts > 0 &&
@@ -1410,11 +580,22 @@ public:
                             .GetLocalCcShards()
                             ->CreateTableSchemaFromImage(
                                 table_name,
-                                schema_op_msg.new_catalog_blob(),
+                                committed_blob,
                                 dirty_schema_commit_ts);
 
                     OperationType op_type = static_cast<OperationType>(
                         schema_op_msg.table_op().op_type());
+                    if (op_type == OperationType::CreateTable || rolled_back)
+                    {
+                        // A create's kv tables exist since before its commit
+                        // log (UpsertTableOp::CreateKvTables), with their
+                        // ranges at the prepare-stage version; only the catalog
+                        // row may be missing. Op type Update is the store's
+                        // catalog-only write. A rolled-back add index likewise
+                        // writes only its catalog row, the current schema; the
+                        // recovered coordinator drops the index's kv tables.
+                        op_type = OperationType::Update;
+                    }
 
                     upsert_kv_err_code = {false, CcErrorCode::NO_ERROR};
                     shard_->local_shards_.store_hd_->UpsertTable(
@@ -1443,7 +624,7 @@ public:
                     table_name,
                     req.NodeGroupId(),
                     dirty_schema_commit_ts > 0
-                        ? schema_op_msg.new_catalog_blob()
+                        ? committed_blob
                         : schema_op_msg.old_catalog_blob(),
                     dirty_schema_commit_ts > 0 ? dirty_schema_commit_ts
                                                : old_schema_commit_ts);
@@ -1620,24 +801,35 @@ public:
         case ::txlog::SchemaOpMessage_Stage::
             SchemaOpMessage_Stage_PrepareSchema:
         {
-            // If the prepare log has been flushed, the recovered cc ng leader
-            // replays all steps between the prepare log and the commit log,
-            // including the write lock on the schema. The recovered write lock
-            // is special in that the holding tx is not associated with the tx's
-            // term (always set to 0). This is because after the prepare log,
-            // the write lock on the schema and the coordinating tx are
-            // guaranteed to be recovered upon failures. The tx's term is not
-            // necessary here to mark whether or not if the coordinating tx has
-            // failed or not.
-            if (req.RangeSplitting(base_table_name) ||
-                op_type == OperationType::AddIndex)
+            // The lock restored is the one the coordinating tx may rely on
+            // (docs/range-split-schema-op-recovery.md). The holder's term is
+            // 0: after the prepare log the lock and the op are recovered
+            // whatever fails, so no term marks the holder as failed.
+            //
+            // The coordinator's node group restores a write intent: the op,
+            // recovered here, redoes every step after its prepare log, its
+            // write locks among them, which drain the DML admitted meanwhile.
+            //
+            // A participant cannot tell how far the live coordinator got: it
+            // may already hold this node group's write lock, the last step
+            // before its commit log, and it does not ask again. So a
+            // participant restores the write lock, keeping the commit log's
+            // barrier, unless the coordinator cannot hold it here:
+            // - an add index holds only an intent between its prepare log and
+            //   its prepare data log, the stage the record names;
+            // - a split of the table that this node group coordinates holds
+            //   the table's catalog read lock here, from before its first log
+            //   to after its clean log, and the read lock excludes every write
+            //   lock. The coordinator's write lock request, lost with the old
+            //   leader, fails its liveness check (NG_TERM_CHANGED) and is sent
+            //   again; granted here, it drains the DML admitted meanwhile.
+            const uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            const bool is_coordinator =
+                tx_node_id == req.NodeGroupId() &&
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0;
+            if (is_coordinator || op_type == OperationType::AddIndex ||
+                req.RangeSplitting(base_table_name))
             {
-                // If range splitting is also happening on this table, which
-                // must have acquired a read lock on the catalog entry, that
-                // means we only need to recover a write intent.
-                // For add index operation, between the prepare log and the
-                // prepare index table log, the recovered cc ng leader should
-                // recover the write intent on the schema.
                 lock_type = LockType::WriteIntent;
             }
             else
@@ -1648,11 +840,59 @@ public:
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData:
         {
-            lock_type = LockType::WriteIntent;
+            // An add index writes this record after each batch of its build,
+            // under intents, and after the last one (last key +inf, kept by
+            // the log state) takes its commit-stage write locks. The
+            // coordinator's node group restores a write intent: the recovered
+            // op resumes from the record and takes those locks itself. A
+            // participant past the last record cannot tell whether the live
+            // coordinator already holds its write lock, so it restores the
+            // write lock, unless a split of the table that this node group
+            // coordinates is in flight, whose catalog read lock excludes that
+            // write lock (as for PrepareSchema above). Before the last record
+            // the build still runs under intents, so an intent.
+            const uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            const bool is_coordinator =
+                tx_node_id == req.NodeGroupId() &&
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0;
+            const bool build_finished =
+                schema_op_msg.last_key_type() ==
+                ::txlog::SchemaOpMessage_LastKeyType_PosInfKey;
+            if (!is_coordinator && build_finished &&
+                !req.RangeSplitting(base_table_name))
+            {
+                lock_type = LockType::WriteLock;
+            }
+            else
+            {
+                lock_type = LockType::WriteIntent;
+            }
             break;
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema:
         {
+            // Only the coordinator's node group restores a lock at the commit
+            // stage: a write intent on the schema, under which the recovered
+            // op redoes its steps after the commit log, data store writes
+            // among them, and which the op's PostCommit or Rollback releases.
+            // The intent keeps a newer DDL on the table out until then, so no
+            // late write of the recovered op lands after one. It is not a
+            // write lock: the entry already holds the committed schema (step
+            // 1), so the op's effect is in place for everyone else, and a read
+            // of the entry must not wait for the op. The op's PostWriteAll
+            // needs the node group's leader term, which comes only once the
+            // log replay has finished, and that replay reads this entry to
+            // replay the table's data (CcShard::InitCcm, which fails on a
+            // write lock). The condition is the one below that starts the
+            // recovered op. A participant installs the committed schema with
+            // no lock, and the op's later post writes, finding no lock of
+            // theirs, finish at once (Execute(PostWriteAllCc&)).
+            const uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            if (tx_node_id == req.NodeGroupId() &&
+                Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0)
+            {
+                lock_type = LockType::WriteIntent;
+            }
             break;
         }
         default:
@@ -1717,6 +957,46 @@ public:
         {
             assert(op_type == OperationType::CreateTable);
             cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
+        }
+        else if ((op_type == OperationType::AddIndex ||
+                  op_type == OperationType::DropIndex) &&
+                 (schema_op_msg.stage() ==
+                      ::txlog::SchemaOpMessage_Stage::
+                          SchemaOpMessage_Stage_PrepareSchema ||
+                  schema_op_msg.stage() ==
+                      ::txlog::SchemaOpMessage_Stage::
+                          SchemaOpMessage_Stage_PrepareData))
+        {
+            // Replaying a prepare-stage log restores the state after
+            // PrepareCommit, at which an index op published its timestamp on
+            // the entry under the prepare-stage write lock (TemplateCcMap,
+            // Execute(PostWriteAllCc&)). The recovered lock may be only an
+            // intent, but the entry must carry the same timestamp, so that a tx
+            // reading the dirty schema here still commits above the index op.
+            // The record set above is complete, so the entry is loaded now; an
+            // entry left Unknown must keep commit ts 0 (see TemplateCcMap). The
+            // commit ts only moves forward, so a repeated replay changes
+            // nothing.
+            cce->SetCommitTsPayloadStatus(catalog_entry->dirty_schema_version_,
+                                          RecordStatus::Normal);
+        }
+        else if (schema_op_msg.stage() ==
+                     ::txlog::SchemaOpMessage_Stage::
+                         SchemaOpMessage_Stage_CommitSchema &&
+                 catalog_entry->schema_version_ > 0)
+        {
+            // Replaying a commit log installs the committed schema, or the
+            // current one for an op the log rolled back, at its version and
+            // with no dirty schema. The record set above is complete, so the
+            // entry is loaded now, as a catalog read would load it. Left
+            // Unknown, it would take the commit ts of a Rollback the recovered
+            // op sends above 0 while keeping its status, and the first read
+            // could not load it at that same ts: the commit ts only moves
+            // forward. A PostCommit or Rollback at the same ts changes nothing.
+            cce->SetCommitTsPayloadStatus(catalog_entry->schema_version_,
+                                          catalog_entry->schema_ != nullptr
+                                              ? RecordStatus::Normal
+                                              : RecordStatus::Deleted);
         }
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
@@ -2570,6 +1850,939 @@ public:
     }
 
 private:
+    /** @brief A cc entry of the catalog cc map. */
+    using CatalogCce = CcEntry<CatalogKey, CatalogRecord, true, false>;
+
+    /**
+     * @brief PrepareCommit of a schema op: installs the op's dirty schema on
+     * this node and the record the template puts in the cc entry of every
+     * core. An index op also readies its table (PrepareIndexOp), and an add
+     * index creates its new indexes' cc maps.
+     *
+     * @param req The request.
+     * @param table_key The table's catalog key.
+     * @param ng_term The node group's leader term.
+     * @return As Execute(): whether the request is done with this core.
+     */
+    bool PrepareCommitSchema(PostWriteAllCc &req,
+                             const CatalogKey &table_key,
+                             int64_t ng_term)
+    {
+        // Every sender prepares after its prepare log, or, for
+        // FlushUpdateTableOp, once its tx has committed: at a commit ts above
+        // 0. A post write at 0 is a Rollback or a DowngradeLock
+        // (PostWriteType::Rollback).
+        assert(req.CommitTs() != TransactionOperation::tx_op_failed_ts_);
+
+        const NodeGroupId ng_id = req.NodeGroupId();
+        CatalogEntry *catalog_entry = nullptr;
+        if (shard_->core_id_ == 0)
+        {
+            // The first core instantiates the dirty schema in LocalCcShards.
+            // A DROP TABLE's payload carries no image.
+            CatalogRecord *schema_rec =
+                RequestRecord(req, req.OpType() != OperationType::DropTable);
+            catalog_entry =
+                shard_->CreateDirtyCatalog(table_key.Name(),
+                                           ng_id,
+                                           schema_rec->DirtySchemaImage(),
+                                           req.CommitTs());
+            if ((req.OpType() == OperationType::AddIndex ||
+                 req.OpType() == OperationType::DropIndex) &&
+                !PrepareIndexOp(req, table_key, *catalog_entry, ng_term))
+            {
+                return false;
+            }
+
+            schema_rec->Set(catalog_entry->schema_,
+                            catalog_entry->dirty_schema_,
+                            catalog_entry->schema_version_);
+        }
+        else
+        {
+            // Core 0 set up the record the template installs.
+            assert(req.Payload() != nullptr);
+            catalog_entry = shard_->GetCatalog(table_key.Name(), ng_id);
+            if (catalog_entry == nullptr)
+            {
+                // The table catalog haven't been initialized. Just return.
+                req.Result()->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                return true;
+            }
+        }
+
+        if (req.OpType() == OperationType::AddIndex &&
+            catalog_entry->dirty_schema_version_ > 0)
+        {
+            SetAddedIndexCcms(*catalog_entry, ng_id, true);
+        }
+        return TemplateCcMap::Execute(req);
+    }
+
+    /**
+     * @brief Readies an index op's table on this node for its dirty schema.
+     * Done once, on core 0, after the dirty schema is installed.
+     *
+     * 1. The current schema. The DDL read it on the coordinator's node group
+     *    only, so another node group may not have loaded the table yet.
+     *    Installing the dirty schema first is harmless: a current schema
+     *    fetched later is older than it and keeps it
+     * (CatalogEntry::InitSchema), and CreateDirtyCatalog changes nothing when
+     * the request runs again.
+     * 2. The table's statistics (building them needs the table's ranges),
+     *    which the dirty schema takes over: it becomes the current schema.
+     * 3. For an add index, the new indexes, which the table's cc maps and
+     *    transactions may reach while the op runs: their ranges, at the op's
+     *    version and with empty slices for the ranges this node group owns
+     *    and has none for yet, and their entries in the statistics.
+     *
+     * A load is asynchronous: the request runs again once it completes.
+     *
+     * @param req The PrepareCommit request.
+     * @param table_key The table's catalog key.
+     * @param catalog_entry The table's catalog entry, holding the dirty schema.
+     * @param ng_term The node group's leader term.
+     * @return false while something is being fetched.
+     */
+    bool PrepareIndexOp(PostWriteAllCc &req,
+                        const CatalogKey &table_key,
+                        CatalogEntry &catalog_entry,
+                        int64_t ng_term)
+    {
+        const NodeGroupId ng_id = req.NodeGroupId();
+        if (catalog_entry.schema_ == nullptr)
+        {
+            shard_->FetchCatalog(table_key.Name(), ng_id, ng_term, &req);
+            return false;
+        }
+        if (Sharder::Instance().GetLocalCcShards()->store_hd_ != nullptr &&
+            !table_key.Name().IsHashPartitioned() &&
+            shard_->LoadRangesAndStatisticsNx(
+                catalog_entry.schema_.get(), ng_id, ng_term, &req) == nullptr)
+        {
+            return false;
+        }
+        catalog_entry.dirty_schema_->BindStatistics(
+            catalog_entry.schema_->StatisticsObject());
+        if (req.OpType() != OperationType::AddIndex)
+        {
+            return true;
+        }
+
+        const std::vector<TableName> added_index_names =
+            IndexesNotIn(*catalog_entry.dirty_schema_, *catalog_entry.schema_);
+        // A new index may come with pre-defined ranges, based on the data
+        // distribution the caller offered, so its ranges are loaded rather
+        // than initialized empty.
+        for (const TableName &index_name : added_index_names)
+        {
+            const TableName index_range_name = RangeTableNameOf(index_name);
+            auto ranges =
+                shard_->GetTableRangesForATable(index_range_name, ng_id);
+            if (ranges == nullptr)
+            {
+                shard_->FetchTableRanges(
+                    index_range_name, &req, ng_id, ng_term);
+                return false;
+            }
+
+            for (auto &range : *ranges)
+            {
+                range.second->SetVersion(req.CommitTs());
+                NodeGroupId range_owner =
+                    shard_
+                        ->GetRangeOwner(
+                            range.second->GetRangeInfo()->PartitionId(), ng_id)
+                        ->BucketOwner();
+                if (range_owner == ng_id &&
+                    range.second->RangeSlices() == nullptr)
+                {
+                    // This node group owns the range, which is empty.
+                    InitEmptyRangeSlices(*range.second, ng_id);
+                }
+            }
+        }
+
+        for (const TableName &index_name : added_index_names)
+        {
+            catalog_entry.schema_->StatisticsObject()->CreateIndex(
+                index_name,
+                catalog_entry.dirty_schema_->IndexKeySchema(index_name),
+                cc_ng_id_);
+        }
+        return true;
+    }
+
+    /**
+     * @brief UpdateDirty of an add index: replaces the dirty schema if the
+     * request carries a new image of it, and moves the new indexes' cc maps to
+     * it.
+     *
+     * @param req The request.
+     * @param table_key The table's catalog key.
+     * @return As Execute(): whether the request is done with this core.
+     */
+    bool UpdateDirtySchema(PostWriteAllCc &req, const CatalogKey &table_key)
+    {
+        assert(req.OpType() == OperationType::AddIndex);
+        assert(req.CommitTs() != TransactionOperation::tx_op_failed_ts_);
+        const NodeGroupId ng_id = req.NodeGroupId();
+        CatalogEntry *catalog_entry =
+            shard_->GetCatalog(table_key.Name(), ng_id);
+        if (catalog_entry == nullptr)
+        {
+            // The table catalog haven't been initialized. Just return.
+            req.Result()->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            return true;
+        }
+
+        if (shard_->core_id_ == 0)
+        {
+            CatalogRecord *schema_rec = RequestRecord(req);
+            if (catalog_entry->dirty_schema_->SchemaImage() !=
+                schema_rec->DirtySchemaImage())
+            {
+                assert(catalog_entry->dirty_schema_version_ == req.CommitTs());
+                std::shared_ptr<TableSchema> old_dirty_schema =
+                    catalog_entry->dirty_schema_;
+                shard_->UpdateDirtyCatalog(table_key.Name(),
+                                           schema_rec->DirtySchemaImage(),
+                                           catalog_entry);
+                catalog_entry->dirty_schema_->BindStatistics(
+                    old_dirty_schema->StatisticsObject());
+            }
+
+            schema_rec->Set(catalog_entry->schema_,
+                            catalog_entry->dirty_schema_,
+                            catalog_entry->schema_version_);
+        }
+        else
+        {
+            // Core 0 set up the record the template installs.
+            assert(req.Payload() != nullptr);
+        }
+
+        if (catalog_entry->dirty_schema_version_ > 0)
+        {
+            SetAddedIndexCcms(*catalog_entry, ng_id, false);
+        }
+        return TemplateCcMap::Execute(req);
+    }
+
+    /**
+     * @brief Points the cc maps of an add index's new indexes at the dirty
+     * schema, on this core. The existing indexes' cc maps move at PostCommit.
+     *
+     * @param catalog_entry The table's catalog entry, holding the dirty schema.
+     * @param ng_id The node group.
+     * @param is_create Whether to create the cc maps: at PrepareCommit.
+     */
+    void SetAddedIndexCcms(const CatalogEntry &catalog_entry,
+                           NodeGroupId ng_id,
+                           bool is_create)
+    {
+        for (const TableName &index_name :
+             IndexesNotIn(*catalog_entry.dirty_schema_, *catalog_entry.schema_))
+        {
+            SetTableCcms(index_name,
+                         catalog_entry.dirty_schema_.get(),
+                         ng_id,
+                         catalog_entry.dirty_schema_version_,
+                         is_create);
+        }
+    }
+
+    /**
+     * @brief PostCommit of a schema op: promotes the dirty schema at the
+     * commit timestamp.
+     *
+     * Core 0 fills the request's record from the node's catalog entry: the
+     * requester's record for a local request, one the request owns for a
+     * remote one, which carries none (RequestRecord). The template installs it
+     * in every core's cc entry, copy-on-write
+     * (VersionedPayload::SetCurrentPayload). Each core moves the table's cc
+     * maps; the last core cleans what the op removed and commits the catalog
+     * entry; the template publishes the commit timestamp and releases the
+     * lock.
+     *
+     * @param req The request.
+     * @param table_key The table's catalog key.
+     * @param cce The table's cc entry on this core.
+     * @param ng_term The node group's leader term.
+     * @return As Execute(): whether the request is done with this core.
+     */
+    bool PostCommitSchema(PostWriteAllCc &req,
+                          const CatalogKey &table_key,
+                          CatalogCce &cce,
+                          int64_t ng_term)
+    {
+        FinishSchemaWriter(req, table_key);
+        CatalogEntry *catalog_entry =
+            shard_->GetCatalog(table_key.Name(), req.NodeGroupId());
+
+        // Only a Rollback leaves the commit timestamp at 0.
+        const uint64_t commit_ts = req.CommitTs();
+        assert(commit_ts != TransactionOperation::tx_op_failed_ts_);
+        assert(catalog_entry != nullptr);
+        if (shard_->core_id_ == 0)
+        {
+            CommitNodeLevelSchema(req, table_key, *catalog_entry);
+            // The record promotes the dirty schema, at the commit timestamp,
+            // which is the schema record's new version; DROP TABLE's dirty
+            // schema is null, so its record holds no schema. An entry without
+            // a dirty schema version has nothing to promote and keeps its
+            // current schema.
+            CatalogRecord *rec = RequestRecord(req, false);
+            if (catalog_entry->dirty_schema_version_ > 0)
+            {
+                rec->Set(catalog_entry->dirty_schema_, nullptr, commit_ts);
+            }
+            else
+            {
+                rec->Set(catalog_entry->schema_,
+                         nullptr,
+                         catalog_entry->schema_version_);
+            }
+        }
+        else
+        {
+            // Core 0 filled the record the template installs.
+            assert(req.Payload() != nullptr);
+        }
+
+        if (catalog_entry->dirty_schema_version_ > 0)
+        {
+            CommitTableCcms(req, table_key, *catalog_entry, cce, ng_term);
+            if (shard_->core_id_ == shard_->core_cnt_ - 1)
+            {
+                CleanRemovedTables(req, table_key, *catalog_entry);
+                catalog_entry->CommitDirtySchema(commit_ts);
+            }
+        }
+        return TemplateCcMap::Execute(req);
+    }
+
+    /**
+     * @brief Rollback of a schema op, its second phase instead of PostCommit:
+     * discards the dirty schema and undoes what the prepare stage did.
+     *
+     * An op that failed, before or after its prepare log, commits at timestamp
+     * 0, which leaves the catalog entry's version alone; an add index whose
+     * build broke a constraint commits at its commit-stage timestamp, which
+     * the catalog entry takes. No table's version changes. An add index's new
+     * cc maps, made at its prepare stage, go on every core, their ranges and
+     * statistics on the last.
+     *
+     * An op that failed before its prepare log installed no dirty schema, so
+     * there is nothing to discard: the request then carries no record and the
+     * template only releases the lock. Having failed to acquire its write
+     * intents, such an op may hold them on some cores only, core 0 or not.
+     * An op that installed a dirty schema holds every core; core 0 fills the
+     * record the template installs on each.
+     *
+     * @param req The request.
+     * @param table_key The table's catalog key.
+     * @return As Execute(): whether the request is done with this core.
+     */
+    bool RollBackSchema(PostWriteAllCc &req, const CatalogKey &table_key)
+    {
+        FinishSchemaWriter(req, table_key);
+        CatalogEntry *catalog_entry =
+            shard_->GetCatalog(table_key.Name(), req.NodeGroupId());
+        const uint64_t commit_ts = req.CommitTs();
+
+        // A dirty schema on this node can only be the op's own: another op
+        // installs one only once it holds the write intent on every core of
+        // every node group, which it cannot while this op holds any. The last
+        // core drops it, after every other core has looked.
+        //
+        // An entry without one keeps its schema, and the template only
+        // releases the lock. Either the op failed before installing a dirty
+        // schema, at commit ts 0, or this is the coordinator's node group
+        // recovered from a commit log that rolled the op back: replay
+        // installed the current schema at the commit ts, loaded the entry at
+        // it, and restored the write lock this request releases.
+        if (catalog_entry == nullptr ||
+            catalog_entry->dirty_schema_version_ == 0)
+        {
+            assert(commit_ts == TransactionOperation::tx_op_failed_ts_ ||
+                   (catalog_entry != nullptr &&
+                    catalog_entry->schema_version_ == commit_ts));
+            req.SetDecodedPayload(nullptr);
+            return TemplateCcMap::Execute(req);
+        }
+
+        const NodeGroupId ng_id = req.NodeGroupId();
+        const bool last_core = shard_->core_id_ == shard_->core_cnt_ - 1;
+        assert(commit_ts == TransactionOperation::tx_op_failed_ts_ ||
+               catalog_entry->schema_ != nullptr);
+        if (req.OpType() == OperationType::AddIndex)
+        {
+            assert(catalog_entry->schema_ != nullptr &&
+                   catalog_entry->dirty_schema_ != nullptr);
+            for (const TableName &index_name : IndexesNotIn(
+                     *catalog_entry->dirty_schema_, *catalog_entry->schema_))
+            {
+                DropTableCcms(index_name, ng_id);
+                if (last_core)
+                {
+                    CleanIndexRangesAndStatistics(
+                        index_name,
+                        *catalog_entry->dirty_schema_->StatisticsObject(),
+                        ng_id);
+                }
+            }
+        }
+
+        // The record the template installs on every core: the table's current
+        // schema and no dirty schema, at the commit timestamp if the op has
+        // one, else at the current version.
+        if (shard_->core_id_ == 0)
+        {
+            CatalogRecord *rec = RequestRecord(req, false);
+            rec->Set(catalog_entry->schema_,
+                     nullptr,
+                     commit_ts != TransactionOperation::tx_op_failed_ts_
+                         ? commit_ts
+                         : catalog_entry->schema_version_);
+        }
+        else
+        {
+            // Core 0 filled the record the template installs.
+            assert(req.Payload() != nullptr);
+        }
+
+        if (last_core)
+        {
+            catalog_entry->RollBackDirtySchema(commit_ts);
+        }
+        return TemplateCcMap::Execute(req);
+    }
+
+    /**
+     * @brief Ends the op's hold on the schema's reader-writer control block,
+     * which its AcquireAllCc took on the native node group, so that runtime
+     * queries may cache the schema again. Part of both second phases,
+     * PostCommit and Rollback.
+     *
+     * @param req The request.
+     * @param table_key The table's catalog key.
+     */
+    void FinishSchemaWriter(const PostWriteAllCc &req,
+                            const CatalogKey &table_key)
+    {
+        if (!shard_->IsNative(req.NodeGroupId()))
+        {
+            return;
+        }
+        const TableName &tbl_name = table_key.Name();
+        std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
+            shard_->FindSchemaCntl(tbl_name);
+        if (schema_cntl != nullptr)
+        {
+            schema_cntl->FinishWriter(req.Txn());
+            shard_->DeleteSchemaCntl(tbl_name);
+        }
+    }
+
+    /**
+     * @brief The node-level work of committing a schema op, done once, on core
+     * 0, before any core moves its cc maps.
+     *
+     * TRUNCATE TABLE's table is a new one, whose version is the commit-stage
+     * timestamp (UpsertTableOp::AssignCommitStageTs), so its schema is rebuilt
+     * at it before it is promoted. CREATE TABLE installs the table's and its
+     * indexes' initial ranges and statistics, and ALTER TABLE binds the
+     * table's statistics to the dirty schema. Neither has anything to do when
+     * the op is recovering from its commit log: replay installed the committed
+     * schema, leaving no dirty one, and the coordinator's node group reaches
+     * here under the write lock replay restored.
+     *
+     * @param req The PostCommit request.
+     * @param table_key The table's catalog key.
+     * @param catalog_entry The table's catalog entry.
+     */
+    void CommitNodeLevelSchema(const PostWriteAllCc &req,
+                               const CatalogKey &table_key,
+                               CatalogEntry &catalog_entry)
+    {
+        const uint64_t commit_ts = req.CommitTs();
+        // The version the dirty schema was installed with at the prepare
+        // stage, which the kv tables of a CREATE TABLE and so the table's
+        // initial ranges carry: a node that loads them from the store gets the
+        // same.
+        const uint64_t prepared_version = catalog_entry.dirty_schema_version_;
+        if (req.OpType() == OperationType::TruncateTable &&
+            catalog_entry.dirty_schema_ != nullptr &&
+            commit_ts > prepared_version)
+        {
+            TableSchema::uptr at_commit =
+                shard_->local_shards_.CreateTableSchemaFromImage(
+                    table_key.Name(),
+                    catalog_entry.dirty_schema_->SchemaImage(),
+                    commit_ts);
+            if (catalog_entry.dirty_schema_->StatisticsObject())
+            {
+                at_commit->BindStatistics(
+                    catalog_entry.dirty_schema_->StatisticsObject());
+            }
+            catalog_entry.SetDirtySchema(std::move(at_commit), commit_ts);
+        }
+
+        if (req.OpType() == OperationType::CreateTable &&
+            catalog_entry.dirty_schema_ != nullptr)
+        {
+            InitCreatedTableRange(
+                table_key.Name(), prepared_version, req.NodeGroupId());
+            for (const TableName &index_name :
+                 catalog_entry.dirty_schema_->IndexNames())
+            {
+                InitCreatedTableRange(
+                    index_name, prepared_version, req.NodeGroupId());
+            }
+            shard_->InitTableStatistics(catalog_entry.dirty_schema_.get(),
+                                        cc_ng_id_);
+        }
+        else if (req.OpType() == OperationType::Update &&
+                 catalog_entry.dirty_schema_ != nullptr)
+        {
+            assert(catalog_entry.schema_->StatisticsObject());
+            catalog_entry.dirty_schema_->BindStatistics(
+                catalog_entry.schema_->StatisticsObject());
+        }
+    }
+
+    /**
+     * @brief Moves a committed schema op's cc maps on this core: TRUNCATE
+     * TABLE's to the new table, DROP TABLE's away, CREATE TABLE's into being,
+     * and ALTER TABLE's to the new schema, dropping those of a dropped index.
+     *
+     * @param req The PostCommit request.
+     * @param table_key The table's catalog key.
+     * @param catalog_entry The table's catalog entry, still holding the current
+     * and the dirty schema.
+     * @param cce The table's cc entry on this core.
+     * @param ng_term The node group's leader term.
+     */
+    void CommitTableCcms(const PostWriteAllCc &req,
+                         const CatalogKey &table_key,
+                         const CatalogEntry &catalog_entry,
+                         CatalogCce &cce,
+                         int64_t ng_term)
+    {
+        const NodeGroupId ng_id = req.NodeGroupId();
+        const TableName &table_name = table_key.Name();
+        const TableSchema *old_schema = catalog_entry.schema_.get();
+        const TableSchema *new_schema = catalog_entry.dirty_schema_.get();
+        const uint64_t dirty_version = catalog_entry.dirty_schema_version_;
+        switch (req.OpType())
+        {
+        case OperationType::TruncateTable:
+        {
+            assert(table_name.Engine() == TableEngine::EloqKv);
+            // Only the base table's cc map moves to the new schema: EloqKV
+            // tables have no indexes. A truncate of a table with indexes would
+            // have to move each index's map too, since CleanCcm empties them,
+            // and its data step, which drops only the base table's kv table,
+            // would have to reset ranges and statistics too
+            // (UpsertTableOp::TruncateUntilCommitLog).
+            // A remote tx is allowed to acquire write intents/locks and drop a
+            // table, even if the table's schema has not been initialized at
+            // this node. The earlier acquiring-write-intent request creates a
+            // schema cc entry in the catalog cc map and a node-level schema
+            // view. The version timestamp of the schema is 0, if the schema is
+            // uninitialized (null). Or, the current schema must not be null.
+            assert(catalog_entry.schema_version_ == 0 || old_schema != nullptr);
+            assert(new_schema->Version() == dirty_version);
+            shard_->UpdateCcmSchema(table_name,
+                                    ng_id,
+                                    catalog_entry.dirty_schema_.get(),
+                                    dirty_version);
+            if (shard_->core_id_ == 0 &&
+                !shard_->GetSubscribedStandbys().empty())
+            {
+                ForwardTruncateToStandbys(
+                    req, table_key, catalog_entry, ng_term);
+            }
+            break;
+        }
+        case OperationType::DropTable:
+        {
+            // As for truncate, the current schema may be uninitialized here.
+            assert(catalog_entry.schema_version_ == 0 || old_schema != nullptr);
+            DropTableCcms(table_name, ng_id);
+            if (old_schema != nullptr)
+            {
+                for (const TableName &index_name : old_schema->IndexNames())
+                {
+                    DropTableCcms(index_name, ng_id);
+                }
+            }
+            break;
+        }
+        case OperationType::CreateTable:
+        {
+            assert(new_schema != nullptr);
+            shard_->CreateOrUpdatePkCcMap(
+                table_name, new_schema, ng_id, true, true);
+            for (const TableName &index_name : new_schema->IndexNames())
+            {
+                shard_->CreateOrUpdateSkCcMap(index_name, new_schema, ng_id);
+            }
+            break;
+        }
+        default:
+        {
+            // ALTER TABLE: the table's cc maps take the new schema; an index
+            // the op dropped loses its cc maps. An add index's new indexes are
+            // not in the old schema and are left alone: their cc maps point at
+            // the dirty schema since PrepareCommit (SetAddedIndexCcms), at the
+            // op's version, and CommitDirtySchema promotes that schema object
+            // as it is.
+            assert(old_schema != nullptr && new_schema != nullptr);
+            SetTableCcms(table_name, new_schema, ng_id, dirty_version, false);
+            if (req.OpType() == OperationType::AddIndex ||
+                req.OpType() == OperationType::DropIndex ||
+                req.OpType() == OperationType::Update)
+            {
+                const std::vector<TableName> new_index_names =
+                    new_schema->IndexNames();
+                for (const TableName &old_index_name : old_schema->IndexNames())
+                {
+                    if (std::find(new_index_names.begin(),
+                                  new_index_names.end(),
+                                  old_index_name) != new_index_names.end())
+                    {
+                        SetTableCcms(old_index_name,
+                                     new_schema,
+                                     ng_id,
+                                     dirty_version,
+                                     false);
+                    }
+                    else
+                    {
+                        assert(req.OpType() == OperationType::DropIndex);
+                        DropTableCcms(old_index_name, ng_id);
+                    }
+                }
+            }
+            break;
+        }
+        }
+
+        UpdateTableLocks(
+            table_name.StringView(), dirty_version, cce.GetKeyLock());
+    }
+
+    /**
+     * @brief Cleans the node-level structures of the tables and indexes a
+     * committed schema op removed: their ranges and statistics. Done once, on
+     * the last core, after every core dropped their cc maps.
+     *
+     * @param req The PostCommit request.
+     * @param table_key The table's catalog key.
+     * @param catalog_entry The table's catalog entry, still holding the current
+     * and the dirty schema.
+     */
+    void CleanRemovedTables(const PostWriteAllCc &req,
+                            const CatalogKey &table_key,
+                            const CatalogEntry &catalog_entry)
+    {
+        const NodeGroupId ng_id = req.NodeGroupId();
+        const TableName &table_name = table_key.Name();
+        const TableSchema *old_schema = catalog_entry.schema_.get();
+        if (req.OpType() == OperationType::DropTable)
+        {
+            shard_->CleanTableStatistics(table_name, cc_ng_id_);
+            if (!table_name.IsHashPartitioned())
+            {
+                shard_->CleanTableRange(RangeTableNameOf(table_name), ng_id);
+                if (old_schema != nullptr)
+                {
+                    for (const TableName &index_name : old_schema->IndexNames())
+                    {
+                        shard_->CleanTableRange(RangeTableNameOf(index_name),
+                                                ng_id);
+                    }
+                }
+            }
+        }
+        else if (req.OpType() == OperationType::AddIndex ||
+                 req.OpType() == OperationType::DropIndex)
+        {
+            for (const TableName &index_name :
+                 IndexesNotIn(*old_schema, *catalog_entry.dirty_schema_))
+            {
+                CleanIndexRangesAndStatistics(
+                    index_name, *old_schema->StatisticsObject(), ng_id);
+            }
+        }
+    }
+
+    /**
+     * @brief The name of the range-partition table that holds a table's
+     * ranges.
+     *
+     * @param table A base or index table.
+     * @return A view of @p table's name, valid while @p table is.
+     */
+    static TableName RangeTableNameOf(const TableName &table)
+    {
+        return TableName{
+            table.StringView(), TableType::RangePartition, table.Engine()};
+    }
+
+    /**
+     * @brief The indexes of one schema that another schema does not have.
+     *
+     * @param schema The schema whose indexes are listed.
+     * @param other The schema they are compared with.
+     * @return The names of @p schema's indexes absent from @p other, in
+     * @p schema's order.
+     */
+    static std::vector<TableName> IndexesNotIn(const TableSchema &schema,
+                                               const TableSchema &other)
+    {
+        std::vector<TableName> names = schema.IndexNames();
+        const std::vector<TableName> other_names = other.IndexNames();
+        names.erase(std::remove_if(names.begin(),
+                                   names.end(),
+                                   [&other_names](const TableName &name)
+                                   {
+                                       return std::find(other_names.begin(),
+                                                        other_names.end(),
+                                                        name) !=
+                                              other_names.end();
+                                   }),
+                    names.end());
+        return names;
+    }
+
+    /**
+     * @brief The catalog record of a post-write-all request.
+     *
+     * A local request references the requester's record. A remote one
+     * carries it serialized, or carries none (PostCommit, Rollback); a record
+     * the request owns holds it, which the later cores read as the request's
+     * payload.
+     *
+     * @param req The request.
+     * @param decode Whether to decode a remote payload; a DROP TABLE's
+     * PrepareCommit, a PostCommit and a Rollback carry nothing to decode. A
+     * remote request at commit timestamp 0 has no payload string at all.
+     * @return The record.
+     */
+    static CatalogRecord *RequestRecord(PostWriteAllCc &req, bool decode = true)
+    {
+        if (req.Payload() != nullptr)
+        {
+            return static_cast<CatalogRecord *>(req.Payload());
+        }
+        assert(!decode || req.PayloadStr() != nullptr);
+        std::unique_ptr<CatalogRecord> decoded_rec =
+            std::make_unique<CatalogRecord>();
+        if (decode)
+        {
+            size_t offset = 0;
+            decoded_rec->Deserialize(req.PayloadStr()->data(), offset);
+        }
+        CatalogRecord *rec = decoded_rec.get();
+        req.SetDecodedPayload(std::move(decoded_rec));
+        return rec;
+    }
+
+    /**
+     * @brief Drops a table's cc map and, for a range-partitioned table, the cc
+     * map of its ranges, on this core.
+     *
+     * @param table A base or index table.
+     * @param ng_id The node group.
+     */
+    void DropTableCcms(const TableName &table, NodeGroupId ng_id)
+    {
+        shard_->DropCcm(table, ng_id);
+        if (!table.IsHashPartitioned())
+        {
+            shard_->DropCcm(RangeTableNameOf(table), ng_id);
+        }
+    }
+
+    /**
+     * @brief Points a table's cc map, and the cc map of its ranges if this
+     * node has them loaded, at a schema, on this core.
+     *
+     * @param table A base or index table.
+     * @param schema The schema the cc maps take.
+     * @param ng_id The node group.
+     * @param range_version The version the range cc map takes.
+     * @param is_create Whether to create a cc map that does not exist.
+     */
+    void SetTableCcms(const TableName &table,
+                      const TableSchema *schema,
+                      NodeGroupId ng_id,
+                      uint64_t range_version,
+                      bool is_create)
+    {
+        if (table.IsBase())
+        {
+            shard_->CreateOrUpdatePkCcMap(table, schema, ng_id, is_create);
+        }
+        else
+        {
+            shard_->CreateOrUpdateSkCcMap(table, schema, ng_id, is_create);
+        }
+        if (table.IsHashPartitioned())
+        {
+            return;
+        }
+        const TableName range_table = RangeTableNameOf(table);
+        if (shard_->GetTableRangesForATable(range_table, ng_id) != nullptr)
+        {
+            shard_->CreateOrUpdateRangeCcMap(
+                range_table, schema, ng_id, range_version, is_create);
+        }
+    }
+
+    /**
+     * @brief Cleans the node-level structures of an index that is gone: its
+     * ranges, and its entry in the table's statistics. Done once, on the last
+     * core, after every core dropped the index's cc maps.
+     *
+     * @param index The index.
+     * @param statistics The table's statistics.
+     * @param ng_id The node group.
+     */
+    void CleanIndexRangesAndStatistics(const TableName &index,
+                                       Statistics &statistics,
+                                       NodeGroupId ng_id)
+    {
+        shard_->CleanTableRange(RangeTableNameOf(index), ng_id);
+        statistics.DropIndex(index);
+    }
+
+    /**
+     * @brief Installs, on this node, the single initial range of a base or
+     * index table that CREATE TABLE made.
+     *
+     * The range spans the whole key space (a null start key is negative
+     * infinity), and its partition id is derived from the table's name; the
+     * sequences table's is 0.
+     *
+     * @param table The base or index table.
+     * @param version The range's version: the version the table's kv tables
+     * were created at.
+     * @param ng_id The node group.
+     */
+    void InitCreatedTableRange(const TableName &table,
+                               uint64_t version,
+                               NodeGroupId ng_id)
+    {
+        const std::string_view name = table.StringView();
+        const int partition_id =
+            name == "./mysql/sequences"
+                ? 0
+                : static_cast<int>(std::hash<std::string_view>()(name) & 0xFFF);
+        std::vector<InitRangeEntry> range_init_vec;
+        range_init_vec.emplace_back(TxKey(), partition_id, version);
+        shard_->local_shards_.InitTableRanges(
+            RangeTableNameOf(table), range_init_vec, ng_id, true);
+    }
+
+    /**
+     * @brief Gives an empty range, which this node group owns, its (empty)
+     * slices, allocated on the table-ranges heap.
+     *
+     * @param range The range.
+     * @param ng_id The node group.
+     */
+    void InitEmptyRangeSlices(TableRangeEntry &range, NodeGroupId ng_id)
+    {
+        std::unique_lock<std::mutex> heap_lk(
+            shard_->local_shards_.table_ranges_heap_mux_);
+        bool is_override_thd = mi_is_override_thread();
+        mi_threadid_t prev_thd = mi_override_thread(
+            shard_->local_shards_.GetTableRangesHeapThreadId());
+        mi_heap_t *prev_heap =
+            mi_heap_set_default(shard_->local_shards_.GetTableRangesHeap());
+
+#if defined(WITH_JEMALLOC)
+        uint32_t prev_arena;
+        JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+        auto table_range_arena_id =
+            shard_->local_shards_.GetTableRangesArenaId();
+        JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
+#endif
+
+        std::vector<SliceInitInfo> slices;
+        range.InitRangeSlices(
+            std::move(slices), ng_id, false, true, UINT64_MAX, false);
+
+        mi_heap_set_default(prev_heap);
+        if (is_override_thd)
+        {
+            mi_override_thread(prev_thd);
+        }
+        else
+        {
+            mi_restore_default_thread_id();
+        }
+
+#if defined(WITH_JEMALLOC)
+        JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
+        heap_lk.unlock();
+    }
+
+    /**
+     * @brief Forwards a committed TRUNCATE TABLE to the standby nodes
+     * subscribed to this node group.
+     *
+     * @param req The PostCommit request.
+     * @param table_key The table's catalog key.
+     * @param catalog_entry The table's catalog entry, still holding the old
+     * and the new schema.
+     * @param ng_term The node group's leader term.
+     */
+    void ForwardTruncateToStandbys(const PostWriteAllCc &req,
+                                   const CatalogKey &table_key,
+                                   const CatalogEntry &catalog_entry,
+                                   int64_t ng_term)
+    {
+        auto forward_entry_ptr = std::make_unique<StandbyForwardEntry>();
+        StandbyForwardEntry *forward_entry = forward_entry_ptr.get();
+        auto *forward_req = &forward_entry->Request();
+        forward_req->set_primary_leader_term(ng_term);
+        forward_req->set_tx_number(req.Txn());
+        forward_req->set_table_name(table_name_.String());
+        forward_req->set_table_type(
+            remote::ToRemoteType::ConvertTableType(table_name_.Type()));
+        forward_req->set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(table_name_.Engine()));
+        forward_req->set_key_shard_code(cc_ng_id_ << 10);
+        std::string key_str;
+        table_key.Serialize(key_str);
+        forward_req->set_key(std::move(key_str));
+        std::string rec_str;
+
+        assert(catalog_entry.schema_ != nullptr);
+        assert(catalog_entry.dirty_schema_ != nullptr);
+        assert(catalog_entry.dirty_schema_version_ > 0);
+
+        CatalogRecord temp_rec;
+        temp_rec.SetSchemaImage(catalog_entry.schema_->SchemaImage());
+        temp_rec.SetDirtySchemaImage(
+            catalog_entry.dirty_schema_->SchemaImage());
+        assert(!temp_rec.SchemaImage().empty());
+        assert(!temp_rec.DirtySchemaImage().empty());
+
+        temp_rec.Serialize(rec_str);
+        forward_req->add_cmd_list(std::move(rec_str));
+
+        forward_req->set_commit_ts(catalog_entry.dirty_schema_version_);
+        forward_req->set_schema_version(catalog_entry.schema_version_);
+        shard_->ForwardStandbyMessage(forward_entry_ptr.release());
+    }
+
     void UpdateTableLocks(std::string_view table_name_sv,
                           uint64_t schema_version,
                           NonBlockingLock *lock_ptr)

@@ -62,7 +62,9 @@ A range split is a logged metadata-and-data transaction. At a high level it:
 5. removes data that is no longer visible through the old range.
 
 The publish point follows durable data synchronization, so readers cannot be
-routed to a range whose base data is incomplete. WAL records preserve enough
+routed to a range whose base data is incomplete. A split that fails before its
+commit log has installed nothing: it rolls back at commit timestamp 0 and only
+releases its locks. WAL records preserve enough
 stage and range metadata for recovery to rebuild pending definitions and resume
 the operation after failover. Cleanup is idempotent because the committed range
 layout, not the former process state, determines which keys remain visible.
@@ -97,6 +99,22 @@ upload capacity, or sleeping for retry. Encoded index entries and the resume key
 therefore require independent ownership; releasing the source batch must not
 invalidate them.
 
+An index build is a schema operation whose prepare log is its point of no
+return. Under the prepare-stage write lock it creates each new index's kv table
+(`DataStoreHandler::CreateKvTable`, one attempt) and writes the prepare log; a
+failure of either drops the tables and fails the operation with no log. Recovery
+returns an NG to the state right after the prepare log, where the dirty schema
+is installed and DML writes the new index, so the kv table must exist in every
+state recovery can reach. The installed dirty schema puts the prepare
+timestamp on the catalog entry, so every DML that sees it commits above that
+timestamp and its index writes survive replay. Data-store steps after the
+prepare log are retried until they succeed, `ddl_kv_retry_interval_seconds`
+apart. The kv catalog receives the new schema once, after the commit log and
+under the commit-stage write lock, so no later schema operation's catalog
+write can be overwritten by it. A build that finds a constraint violation
+commits as rolled back at its commit-stage timestamp, drops the index's kv
+tables and keeps the current schema.
+
 Index expression details and batch encoding belong to the index implementation,
 not to the range architecture.
 
@@ -112,6 +130,8 @@ not to the range architecture.
   synchronization succeeds.
 - Secondary-index generation releases consumed scan batches on their source
   shard before reset, backpressure, or retry.
+- A new index's kv table exists in every state that recovery of its build can
+  reach.
 - Split and migration replay is versioned and idempotent; delayed work from an
   older ownership version must not become visible.
 
@@ -125,4 +145,5 @@ not to the range architecture.
 | `StoreRange` and `StoreSlice` own cached-range, pin, load, and slice-spec lifecycles | `tx_service/include/cc/range_slice.h`; `tx_service/src/cc/range_slice.cpp`; `tx_service/include/cc/range_slice_type.h` |
 | Slice loading and range checkpointing cross the store-handler boundary | `tx_service/include/store/data_store_handler.h`; `tx_service/include/data_sync_task.h`; `tx_service/src/cc/local_cc_shards.cpp` |
 | Range split and bucket migration are staged, recoverable transaction operations | `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp`; `tx_service/tx-log-protos/log.proto` |
+| An index build creates its kv tables before its prepare log and writes the kv catalog once, after its commit log | `tx_service/include/tx_index_operation.h`; `tx_service/src/tx_index_operation.cpp`; `tx_service/include/store/data_store_handler.h`; `tx_service/include/cc/template_cc_map.h`; `tx_service/include/cc/catalog_cc_map.h` |
 | Secondary-index build dispatches range work, releases consumed source batches, and uploads derived entries by ownership | `tx_service/include/tx_index_operation.h`; `tx_service/src/tx_index_operation.cpp`; `tx_service/include/sk_generator.h`; `tx_service/src/sk_generator.cpp`; `tx_service/include/cc/local_cc_shards.h` |

@@ -131,13 +131,36 @@ struct TxLockInfo
 {
     using uptr = std::unique_ptr<TxLockInfo>;
 
+    /**
+     * @brief Whether a write lock on a table of this type holds the
+     * checkpoint back.
+     *
+     * Data tables do: ckpt_ts must stay below every commit still pending
+     * (07-durability-and-recovery.md). So do catalog entries: a DDL's catalog
+     * write lock orders it against DML, and a checkpoint taken while it is
+     * held must stay below it, so that the DDL's log record lands above the
+     * log group's min_ckpt_ts_ (EloqDoc's change data capture relies on it;
+     * 03-concurrency-control.md). Range, bucket and cluster-config write
+     * locks do not: split and migration operations hold them for long
+     * stretches, and nothing downstream needs them ordered.
+     *
+     * @param type The table type of the locked entry.
+     * @return True if the write lock must hold the checkpoint back.
+     */
+    static bool WriteLockHoldsBackCheckpoint(TableType type)
+    {
+        return type != TableType::RangePartition &&
+               type != TableType::RangeBucket &&
+               type != TableType::ClusterConfig;
+    }
+
     TxLockInfo() = delete;
     explicit TxLockInfo(int64_t tx_coord_term)
         : tx_coord_term_(tx_coord_term),
           wlock_ts_(0),
+          holds_ckpt_wlock_(false),
           last_recover_ts_(0),
           cce_list_(),
-          table_type_(TableType::Primary),
           next_(nullptr)
     {
     }
@@ -156,17 +179,39 @@ struct TxLockInfo
     {
         tx_coord_term_ = tx_term;
         wlock_ts_ = 0;
+        holds_ckpt_wlock_ = false;
         last_recover_ts_ = 0;
         cce_list_.clear();
-        table_type_ = TableType::Primary;
         next_ = nullptr;
     }
 
     // tx coordinator's term.
     int64_t tx_coord_term_;
-    // The timestamp when the tx acquires the first write lock in the cc shard.
-    // If tx has not acquired any write lock, set wlock_ts_ to 0.
+    /**
+     * @brief When the tx last acquired a write lock in this shard, on any
+     * table; 0 if it never took one.
+     *
+     * While the tx holds a write lock that counts (holds_ckpt_wlock_),
+     * ActiveTxMinTs keeps the checkpoint below this. That is the guarantee;
+     * outside the exclusive section the checkpoint may pass the tx. DML
+     * chooses its commit timestamp after its last write lock, and each grant
+     * forces the commit above the granting shard's clock (last_vali_ts), so
+     * for DML this is also the tightest lower bound on the commit. It is the
+     * most recent sign that the tx is alive. Also read by ActiveTxMaxTs, by
+     * orphan-lock recovery (the log search's lower bound and the
+     * committed-write window), and by the checkpoint stall warning. A
+     * downgrade leaves it unchanged: it acquires nothing.
+     */
     uint64_t wlock_ts_;
+    /**
+     * @brief Whether the tx holds, in this shard, a write lock that holds the
+     * checkpoint back (WriteLockHoldsBackCheckpoint).
+     *
+     * Set when such a write lock is taken; cleared by OnWriteLockDowngraded
+     * once none remains. A tx's locks span many tables, so this is decided
+     * per write lock, from the locked entry's table.
+     */
+    bool holds_ckpt_wlock_;
     // The last time when the tx is recovered or the tx acquired the latest
     // lock. Gates CheckRecoverTx to once per tx per 5s. The ctor/Reset zero
     // is never observable: UpsertLockHoldingTx — the only path that puts an
@@ -175,9 +220,6 @@ struct TxLockInfo
     uint64_t last_recover_ts_;
     // A list of cc entries on which the tx has acquired write/read locks.
     absl::flat_hash_set<LruEntry *> cce_list_;
-    // This cc map type is used to skip the meta table(such as: catalog, range)
-    // during get ActiveTxMinTs()
-    TableType table_type_;
 
     std::unique_ptr<TxLockInfo> next_{nullptr};
 };
@@ -219,6 +261,12 @@ class CcShardHeap
 {
     static constexpr double high_water = 0.8;
     static constexpr double utilization = 0.8;
+    /**
+     * Headroom an eviction pass works towards once it has started: the
+     * cleaner keeps evicting until this fraction of the limit is free, so the
+     * requests it releases have room, and stops evicting above it.
+     */
+    static constexpr double clean_target_free_ratio = 0.05;
 
 public:
     CcShardHeap(CcShard *cc_shard, size_t limit);
@@ -234,6 +282,22 @@ public:
     bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
 
     bool NeedCleanShard(int64_t &alloc, int64_t &commit) const;
+
+    /**
+     * @brief Whether allocated memory is still above the eviction target.
+     *
+     * Full() is the hard limit at which requests park; this is the lower
+     * target an eviction pass works towards once started. A pass may end
+     * short of it when no more entries are evictable.
+     * @param alloc Bytes currently allocated from this heap.
+     * @return True while less than clean_target_free_ratio of the limit is
+     * free.
+     */
+    bool NeedMoreCleaning(int64_t alloc) const
+    {
+        return alloc > static_cast<int64_t>(memory_limit_ *
+                                            (1.0 - clean_target_free_ratio));
+    }
 
     bool NeedDefragment(int64_t *alloc, int64_t *commit) const;
 
@@ -396,8 +460,15 @@ public:
     void Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req);
 
     /**
-     * @brief Puts a cc request into the shard's request wait list until memory
-     * is avaliable.
+     * @brief Parks a request that found the shard heap full and schedules the
+     * cleaner if it is idle.
+     *
+     * Counts the park so the cleaner can tell that a request found the heap at
+     * its limit after its last release, whoever parked (see
+     * MemoryParkCount()). A cleaner that is
+     * already sweeping or deferred is left alone: the request joins the wait
+     * list and the pass or retry in progress covers it. Must run on the
+     * owning shard.
      * @param req The pointer to the cc request.
      */
     void EnqueueWaitListIfMemoryFull(CcRequestBase *req);
@@ -414,24 +485,111 @@ public:
 
     size_t WaitListSizeForMemory();
 
+    /**
+     * @brief Schedules the cleaner unless it is already in use.
+     *
+     * In use covers queued, executing and deferred (see DeferCleanPass()). In
+     * all three cases the pass or retry already pending sees the current
+     * state when it runs, so nothing is recorded. Must run on the owning
+     * shard.
+     */
     void WakeUpShardCleanCc();
 
     /**
-     * @brief Consumes the wake-up that arrived while the eviction pass was
-     * already running.
+     * @brief Number of requests parked for memory since the shard started.
      *
-     * A wake-up cannot be delivered while ShardCleanCc is in use, and the pass
-     * in flight may have already scanned past the entries the wake-up is about
-     * -- the memory freed by a checkpoint flush that lands mid-pass is a case
-     * in point. Since that pass stops itself once it frees nothing, the
-     * wake-up would be lost and the shard would hold its parked requests until
-     * some later flush. Recording it lets the pass re-run instead.
-     *
-     * @return Whether a wake-up was dropped since the last call.
+     * Every park is a request that found the heap at the hard limit. The
+     * cleaner snapshots the count when it releases a batch; a later change
+     * means a request hit the limit after that release, whether one of the
+     * released ones or a new one, which is the only distinction it needs.
+     * @return The monotonically increasing park count.
      */
-    bool TakeShardCleanCcWakeUp()
+    uint64_t MemoryParkCount() const
     {
-        return std::exchange(shard_clean_cc_wake_pending_, false);
+        return memory_park_count_;
+    }
+
+    /**
+     * @brief Consumes the mark left by a flush or split that completed while
+     * an eviction pass was running.
+     *
+     * The pass in progress is not rewound. It finishes, then runs once more
+     * from the LRU head to reach entries the flush made evictable behind its
+     * cursor. The cleaner also clears the mark when it starts a pass, since a
+     * new pass visits every page anyway.
+     * @return Whether such a completion was recorded.
+     */
+    bool TakeCleanRescanRequest()
+    {
+        return std::exchange(clean_rescan_requested_, false);
+    }
+
+    /**
+     * @brief Defers the cleaner's next pass after one that ended with
+     * requests still parked and nothing more it could evict.
+     *
+     * The cleaner stays in use, so parkers only join the wait list. The timer
+     * thread enqueues it again once the deadline passes
+     * (FireCleanRetryIfDue()), or a flush or split completion does so earlier
+     * (OnDirtyDataFlushed()). Must run on the owning shard.
+     * @param productive Whether the pass reclaimed at least
+     * FLAGS_shard_clean_release_kb (see ShardCleanCc::Execute()). A pass
+     * under that doubles the delay up to kCleanRetryMaxBackoff steps; one at
+     * or above it resets the delay to the base.
+     */
+    void DeferCleanPass(bool productive);
+
+    /**
+     * @brief Clears the retry backoff when the cleaner goes idle.
+     *
+     * The backoff paces the retries of one episode of memory pressure. Once a
+     * pass ends with nothing parked that episode is over, so the next one
+     * starts from the base delay instead of inheriting a stale 1.6 s. Must
+     * run on the owning shard.
+     */
+    void ResetCleanBackoff()
+    {
+        clean_backoff_ = 0;
+    }
+
+    /**
+     * @brief Enqueues the deferred cleaner once its deadline has passed.
+     *
+     * Called from the LocalCcShards timer thread on every tick. Claiming the
+     * deadline with a compare-and-swap keeps exactly one retry outstanding:
+     * whichever of this and OnDirtyDataFlushed() clears it enqueues the
+     * cleaner, and the other does nothing.
+     * @param now_us Current steady-clock time in microseconds.
+     */
+    void FireCleanRetryIfDue(uint64_t now_us);
+
+    /**
+     * @brief Wakes the cleaner for state that just became evictable: a
+     * checkpoint flush on this shard or a committed range split.
+     *
+     * A deferred cleaner runs now with its backoff reset. A cleaner that is
+     * queued or mid-pass is marked to run one more pass after the current
+     * one. An idle one has nothing parked and is left alone. Must run on the
+     * owning shard.
+     */
+    void OnDirtyDataFlushed();
+
+    /**
+     * @brief Deadline of the deferred retry.
+     * @return Steady-clock microseconds, 0 when no retry is pending.
+     */
+    uint64_t CleanRetryDeadline() const
+    {
+        return clean_retry_deadline_.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Consecutive unproductive passes, capped at kCleanRetryMaxBackoff.
+     * @return The current backoff step.
+     */
+    uint8_t CleanBackoff() const
+    {
+        return clean_backoff_;
     }
 
     /**
@@ -480,8 +638,18 @@ public:
     /**
      * @brief Find an available TEntry in tranaction array and initialize it.
      *
+     * @param tx_ng_id The node group the transaction belongs to.
+     * @param log_group_id The transaction's log group.
+     * @param term The node group's term.
+     * @param read_snapshot Whether the transaction reads a snapshot at its
+     * start timestamp (snapshot isolation): its start timestamp is then no
+     * older than the wall clock, which also advances the timestamp base.
+     * @return The transaction's entry.
      */
-    TEntry &NewTx(NodeGroupId tx_ng_id, uint32_t log_group_id, int64_t term);
+    TEntry &NewTx(NodeGroupId tx_ng_id,
+                  uint32_t log_group_id,
+                  int64_t term,
+                  bool read_snapshot = false);
 
     /**
      * @brief Find an available NonBlockingLock in lock array and initialize it.
@@ -606,6 +774,24 @@ public:
                              LruEntry *cce_ptr,
                              NodeGroupId cc_ng_id);
 
+    /**
+     * @brief Called after the tx's write lock on an entry was downgraded to a
+     * write intent, so the lock stops holding the checkpoint back.
+     *
+     * Clears the tx's holds_ckpt_wlock_ unless another write lock of the tx
+     * in this shard still counts (TxLockInfo::WriteLockHoldsBackCheckpoint).
+     * A later upgrade of the intent back to a write lock sets it again and
+     * moves wlock_ts_ to the upgrade time. The downgrade itself leaves
+     * wlock_ts_ alone.
+     *
+     * @param txn The tx whose write lock was downgraded.
+     * @param cc_ng_id The node group of the entry.
+     * @param table_type The table type of the entry's cc map.
+     */
+    void OnWriteLockDowngraded(TxNumber txn,
+                               NodeGroupId cc_ng_id,
+                               TableType table_type);
+
     void DropLockHoldingTxs(NodeGroupId cc_ng_id);
 
     void VerifyOrphanLock(NodeGroupId cc_ng_id, TxNumber txn)
@@ -673,7 +859,8 @@ public:
      *   still be running, and post-processing is what installs each pending
      *   value and then releases its write lock. Write locks are therefore
      *   left to it, unless committed_write_recover_window_seconds has
-     *   passed since the write lock was granted (a wedged post-processing;
+     *   passed since the tx's latest write-lock grant in this shard
+     *   (@p wlock_ts; a wedged post-processing;
      *   the pending write is then treated as lost per the no-WAL contract).
      *
      * Independent of the verdict: read locks, read intents and data write
@@ -724,17 +911,15 @@ public:
                     continue;
                 }
 
-                // Skip meta table because there is no need to do
-                // checkpoint for these type table.
-                if (!TableName::IsMeta(tx_it->second->table_type_) &&
-                    tx_it->second->wlock_ts_ != 0)
+                // Only data-table and catalog write locks count; see
+                // TxLockInfo::WriteLockHoldsBackCheckpoint.
+                const TxLockInfo &lk_info = *tx_it->second;
+                if (lk_info.holds_ckpt_wlock_ && lk_info.wlock_ts_ - 1 < min_ts)
                 {
-                    if (tx_it->second->wlock_ts_ - 1 < min_ts)
-                    {
-                        min_ts = tx_it->second->wlock_ts_ - 1;
-                        *pinning_txn = tx_it->first;
-                        *pinning_wlock_ts = tx_it->second->wlock_ts_;
-                    }
+                    assert(lk_info.wlock_ts_ != 0);
+                    min_ts = lk_info.wlock_ts_ - 1;
+                    *pinning_txn = tx_it->first;
+                    *pinning_wlock_ts = lk_info.wlock_ts_;
                 }
 
                 ++tx_it;
@@ -780,8 +965,7 @@ public:
         {
             for (const auto &tx_pair : it->second)
             {
-                if (!TableName::IsMeta(tx_pair.second->table_type_) &&
-                    tx_pair.second->wlock_ts_ != 0)
+                if (tx_pair.second->holds_ckpt_wlock_)
                 {
                     max_ts = std::max(max_ts, tx_pair.second->wlock_ts_);
                 }
@@ -1269,15 +1453,6 @@ public:
 
     bool EnableDefragment() const;
 
-    void OnDirtyDataFlushed()
-    {
-        ResetCleanStart();
-        if (WaitListSizeForMemory() > 0)
-        {
-            WakeUpShardCleanCc();
-        }
-    }
-
     void ResetRangeSplittingStatus(const TableName &table_name,
                                    uint32_t ng_id,
                                    uint32_t range_id);
@@ -1452,12 +1627,29 @@ private:
     std::unordered_map<uint32_t, std::pair<uint64_t, int64_t>>
         subscribed_standby_nodes_;
     std::unique_ptr<RetryFailedStandbyMsgCc> retry_fwd_msg_cc_;
-    // Shard clean cc
+    /**
+     * The shard's single eviction request. In use while queued, executing or
+     * deferred; idle only when nothing is parked and the heap is at or below
+     * the eviction target.
+     */
     std::unique_ptr<ShardCleanCc> shard_clean_cc_;
-    // Set when a wake-up arrives while shard_clean_cc_ is already in use, so
-    // that the pass in flight re-runs rather than dropping the wake-up. See
-    // TakeShardCleanCcWakeUp().
-    bool shard_clean_cc_wake_pending_{false};
+    /**
+     * Requests parked for memory since the shard started. See
+     * MemoryParkCount().
+     */
+    uint64_t memory_park_count_{0};
+    /**
+     * Steady-clock deadline (us) of the deferred eviction retry, 0 when none.
+     * Written by this shard; claimed by the timer thread or by this shard.
+     */
+    std::atomic<uint64_t> clean_retry_deadline_{0};
+    /** Consecutive unproductive passes; scales the retry delay. */
+    uint8_t clean_backoff_{0};
+    /**
+     * A flush or split completed while a pass was running. See
+     * TakeCleanRescanRequest().
+     */
+    bool clean_rescan_requested_{false};
 
     // Standby forward msg related members used on follower node
     CcRequestPool<KeyObjectStandbyForwardCc> key_obj_standby_msg_cc_pool_;
@@ -1536,6 +1728,16 @@ private:
     static constexpr uint64_t freeBatchSize = 10;
     // The maximum allowed duration(us) of one invocation of Clean().
     static constexpr uint64_t maxDuration = 30;
+    /**
+     * Base delay (us) before a deferred eviction pass retries: one tick of
+     * the LocalCcShards timer thread.
+     */
+    static constexpr uint64_t kCleanRetryBaseDelayUs = 100'000;
+    /**
+     * Cap on the backoff step. The delay is the base shifted left by the
+     * step, so retries are at most 1.6 s apart.
+     */
+    static constexpr uint8_t kCleanRetryMaxBackoff = 4;
 
     // cache all tx info under SI isolation level in this shard,
     // format: {txn->start_ts}

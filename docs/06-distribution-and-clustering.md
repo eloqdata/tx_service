@@ -61,10 +61,27 @@ generation before accepting a response. Leader-location caches are advisory;
 senders must handle a stale destination, refresh leadership, and retry through
 the owning operation's retry policy.
 
+Every leader update carries its term, and the term alone orders them. A node
+learns a leader from the host manager's `NotifyNewLeaderStart`, from a log
+write's reply, which carries the log service's view of each NG's leader and
+term, and from a lookup after a "not leader" error or at start-up. The lookup
+asks the host manager, whose answer names the node only, then asks that node
+for its term (`FetchNodeInfo`); a node that does not lead the NG answers none,
+and the lookup changes nothing. The cache applies an update only above its
+term, the leader and the term together. Every update it applies goes to the
+store handler (`DataStoreHandler::OnLeaderChanged`), also when the leader is
+the same node, so a store that binds data shards to NGs keeps each shard's
+version at the leader's term and refuses an older move
+([09](09-store-handler.md)).
+
 ## Leadership lifecycle and term fencing
 
 Election does not immediately make a node serviceable. `OnLeaderStart` first
-places the NG in candidate-leader state and starts recovery. The leader term is
+places the NG in candidate-leader state and starts recovery, ending with the
+NG's only replay request to the log groups
+([07](07-durability-and-recovery.md)). Once it succeeds, the host manager sends
+every node the NG, its new leader and the term (`NotifyNewLeaderStart`, best
+effort). The leader term is
 published only after every log group has completed replay, so normal CC
 requests cannot observe a partially recovered in-memory replica. A synchronized
 standby may retain its warm state and replay only the missing tail; a cold
@@ -98,6 +115,24 @@ Adding election peers without changing bucket ownership does not require data
 migration. Changes that do move ownership must not expose the new owner before
 the synchronized data is durable and routable.
 
+## Cluster gate
+
+The cluster configuration record carries an optional cluster gate, which
+EloqDoc's change data capture pauses while a consumer copies the data. Schema
+operations hold the cluster configuration read lock from their first step
+through their last write to all NGs, so a scale waits for them and every such
+step reaches the same NGs. While the gate is paused, a schema operation is
+refused at that first step with `CLUSTER_GATED`, before writing any log; one
+past it, or one resumed by recovery, is never refused. A pause or resume is a
+transaction on log group 0 that takes the record's write lock on every NG,
+which is granted only once every admitted schema operation has released its
+read lock, so the pause's commit timestamp bounds every schema operation
+committed before it. Its update sets only the gate in place and never changes
+`Sharder`'s topology, and a retried update whose transaction no longer holds
+the lock stores nothing. Replay reinstalls the gate on every recovering NG
+([07](07-durability-and-recovery.md)), and with metrics on each NG exports
+`cluster_gate_paused`.
+
 ## Standby replication boundary
 
 Candidate data-bearing members subscribe to the leader's per-shard committed
@@ -117,6 +152,9 @@ candidate becomes a complete in-memory replica.
   updates at an older version are idempotent no-ops or are rejected.
 - Remote responses are valid only for the transaction generation and leader
   term that issued the request.
+- A leader update is applied only above the cached term for its NG.
+- While the cluster gate is paused no new schema operation is admitted, and a
+  pause commits only after every admitted one has released its read lock.
 - Every successful node-group data pin must be released; otherwise leader
   stepdown cannot safely reclaim the NG's state.
 - The host manager implementation is outside this documentation boundary. Its
@@ -133,5 +171,7 @@ candidate becomes a complete in-memory replica.
 | Local and remote requests converge on the CC-request/shard execution model | `tx_service/include/remote/remote_cc_handler.h`; `tx_service/include/remote/remote_cc_request.h`; `tx_service/src/remote/cc_stream_sender.cpp`; `tx_service/src/remote/cc_stream_receiver.cpp` |
 | Cluster configuration and bucket ownership are transactional metadata | `tx_service/include/cc/cluster_config_cc_map.h`; `tx_service/include/cluster_config_record.h`; `tx_service/include/cc/range_bucket_cc_map.h`; `tx_service/src/cc/local_cc_shards.cpp` |
 | Scaling and data migration are resumable transaction operations | `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp`; `tx_service/tx-log-protos/log.proto` |
+| Leader updates carry terms; lookups ask the named node for its term | `tx_service/src/sharder.cpp`; `tx_service/src/remote/cc_node_service.cpp`; `tx_service/src/tx_operation.cpp` |
+| The cluster gate admits schema operations at their first step and is paused, resumed and recovered by its own transaction | `tx_service/include/cluster_config_record.h`; `tx_service/include/cc/cluster_config_cc_map.h`; `tx_service/src/tx_cluster_gate_operation.cpp`; `tx_service/src/tx_upsert_table_operation.cpp`; `tx_service/src/tx_index_operation.cpp`; `tx_service/tests/ClusterGate-Test.cpp` |
 | Cross-NG request routing is exercised by the cluster harness | `tx_service/tests/ClusterCrossNg-Test.cpp`; `tx_service/tests/cluster/` |
 | Standby replication has a distinct sequencing and snapshot protocol | `tx_service/include/standby.h`; `tx_service/src/standby.cpp`; `tx_service/tests/StandbyForward-Test.cpp` |

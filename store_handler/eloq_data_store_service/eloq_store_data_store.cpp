@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <memory>
 
+#include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "common.h"
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
@@ -94,35 +95,30 @@ inline void BuildValue(const WriteRecordsRequest &write_req,
     }
 }
 
-EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
-                                       DataStoreService *data_store_service)
-    : DataStore(shard_id, data_store_service)
+bool EloqStoreDataStoreFactory::EnsureStoreStarted()
 {
-    const EloqStoreDataStoreFactory *factory =
-        dynamic_cast<const EloqStoreDataStoreFactory *>(
-            data_store_service->GetDataStoreFactory());
-    assert(factory != nullptr);
-    ::eloqstore::KvOptions opts =
-        factory->eloq_store_configs_.eloqstore_configs_;
-    branch_name_ = factory->eloq_store_configs_.branch_name_;
+    std::lock_guard<std::mutex> lk(store_mux_);
+    if (store_ != nullptr)
+    {
+        return !store_->IsStopped();
+    }
+    ::eloqstore::KvOptions opts = eloq_store_configs_.eloqstore_configs_;
+    // A sweep runs for one data shard; its data store knows the buckets.
+    opts.partition_filter = [this](::eloqstore::DsShardId ds_shard_id,
+                                   const ::eloqstore::TableIdent &table_ident)
+    { return OwnsPartition(ds_shard_id, table_ident); };
     DLOG(INFO) << "Create EloqStore storage with workers: " << opts.num_threads
                << ", store path: " << opts.store_path.front()
                << ", open files limit: " << opts.fd_limit
                << ", cloud store path: " << opts.cloud_store_path
                << ", buffer pool size per shard: " << opts.buffer_pool_size;
-    eloq_store_service_ = std::make_unique<::eloqstore::EloqStore>(opts);
-}
-
-bool EloqStoreDataStore::Initialize()
-{
+    auto store = std::make_unique<::eloqstore::EloqStore>(opts);
 #ifdef ELOQSTORE_WITH_TXSERVICE
     if (metrics::enable_eloqstore_metrics)
     {
-        // Initialize metrics for eloqstore
         eloq_metrics_app::MetricsRegistryImpl::MetricsRegistryResult
             metrics_registry_result =
                 eloq_metrics_app::MetricsRegistryImpl::GetRegistry();
-
         if (metrics_registry_result.not_ok_ != nullptr)
         {
             LOG(WARNING) << "Failed to get metrics registry, skipping "
@@ -131,19 +127,112 @@ bool EloqStoreDataStore::Initialize()
         }
         else if (metrics_registry_result.metrics_registry_ != nullptr)
         {
-            // Create common labels
-            // Note: node_ip and node_port may not be available at Initialize()
-            // time For now, we use empty labels. The shard_id label will be
-            // added by EloqStore::InitializeMetrics()
+            // The meters are per worker shard of the one store; node labels
+            // are not known yet, so the labels stay empty.
             metrics::CommonLabels common_labels{};
-
-            // Call eloqstore's metrics initialization
-            // This will initialize metrics for all shards with shard_id labels
-            eloq_store_service_->InitializeMetrics(
+            store->InitializeMetrics(
                 metrics_registry_result.metrics_registry_.get(), common_labels);
         }
     }
 #endif
+    ::eloqstore::KvError res =
+        store->StartInstance(eloq_store_configs_.branch_name_);
+    if (res != ::eloqstore::KvError::NoError)
+    {
+        LOG(ERROR) << "EloqStore start failed with error code: "
+                   << static_cast<uint32_t>(res);
+        return false;
+    }
+    store_ = std::move(store);
+    return true;
+}
+
+bool EloqStoreDataStoreFactory::OwnsPartition(
+    ::eloqstore::DsShardId ds_shard_id,
+    const ::eloqstore::TableIdent &table_ident) const
+{
+    if (ds_shard_id >= shard_stores_.size())
+    {
+        return false;
+    }
+    const EloqStoreDataStore *data_store =
+        shard_stores_[ds_shard_id].load(std::memory_order_acquire);
+    return data_store != nullptr && data_store->OwnsPartition(table_ident);
+}
+
+void EloqStoreDataStoreFactory::RegisterShardStore(
+    uint32_t shard_id, EloqStoreDataStore *data_store)
+{
+    if (shard_id < shard_stores_.size())
+    {
+        shard_stores_[shard_id].store(data_store, std::memory_order_release);
+    }
+}
+
+EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
+                                       DataStoreService *data_store_service)
+    : DataStore(shard_id, data_store_service)
+{
+    EloqStoreDataStoreFactory *factory =
+        dynamic_cast<EloqStoreDataStoreFactory *>(
+            const_cast<DataStoreFactory *>(
+                data_store_service->GetDataStoreFactory()));
+    assert(factory != nullptr);
+    store_ = factory->Store();
+    CHECK(store_ != nullptr) << "EloqStoreDataStore made before the store";
+    factory->RegisterShardStore(shard_id, this);
+}
+
+EloqStoreDataStore::~EloqStoreDataStore()
+{
+    EloqStoreDataStoreFactory *factory =
+        dynamic_cast<EloqStoreDataStoreFactory *>(
+            const_cast<DataStoreFactory *>(
+                data_store_service_->GetDataStoreFactory()));
+    if (factory != nullptr)
+    {
+        factory->RegisterShardStore(shard_id_, nullptr);
+    }
+}
+
+void EloqStoreDataStore::SetPartitionBuckets(
+    const std::unordered_set<uint16_t> &bucket_ids)
+{
+    partition_buckets_ = bucket_ids;
+}
+
+bool EloqStoreDataStore::OwnsPartition(
+    const ::eloqstore::TableIdent &table_ident) const
+{
+    if (partition_buckets_.empty())
+    {
+        return true;
+    }
+    const std::string &table_name = table_ident.tbl_name_;
+    uint16_t bucket_id;
+    if (table_name.compare(0, 8, "eloqdoc_") == 0 ||
+        table_name.compare(0, 8, "eloqsql_") == 0 ||
+        table_name.compare(0, 7, "irange_") == 0)
+    {
+        // This table engine uses RangePartition: the partition is a range.
+        uint32_t hash_val;
+        butil::MurmurHash3_x86_32(&table_ident.partition_id_,
+                                  sizeof(table_ident.partition_id_),
+                                  9001,
+                                  &hash_val);
+        bucket_id = hash_val % 1024;
+    }
+    else
+    {
+        // HashPartition: the hash partition id equals the bucket id.
+        bucket_id = static_cast<uint16_t>(table_ident.partition_id_);
+    }
+    return partition_buckets_.find(bucket_id) != partition_buckets_.end();
+}
+
+bool EloqStoreDataStore::Initialize()
+{
+    // The store, its metrics included, is set up once by the factory.
 
     return true;
 }
@@ -165,10 +254,11 @@ void EloqStoreDataStore::Read(ReadRequest *read_req)
 
     ::eloqstore::ReadRequest &kv_read_req = read_op->EloqStoreRequest();
     kv_read_req.SetArgs(eloq_store_table_id, key);
+    kv_read_req.SetDsShard(shard_id_);
     kv_read_req.SetReopen(read_req->GetReopen());
 
     uint64_t user_data = reinterpret_cast<uint64_t>(read_op);
-    if (!eloq_store_service_->ExecAsyn(&kv_read_req, user_data, OnRead))
+    if (!store_->ExecAsyn(&kv_read_req, user_data, OnRead))
     {
         LOG(ERROR) << "Send read request to EloqStore failed for table: "
                    << kv_read_req.TableId();
@@ -266,10 +356,11 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
     }
 
     kv_write_req.SetArgs(eloq_store_table_id, std::move(entries));
+    kv_write_req.SetDsShard(shard_id_);
 
     uint64_t user_data = reinterpret_cast<uint64_t>(write_op);
 
-    if (!eloq_store_service_->ExecAsyn(&kv_write_req, user_data, OnBatchWrite))
+    if (!store_->ExecAsyn(&kv_write_req, user_data, OnBatchWrite))
     {
         LOG(ERROR) << "Send write request to EloqStore failed for table: "
                    << kv_write_req.TableId();
@@ -354,10 +445,10 @@ void EloqStoreDataStore::DeleteRange(DeleteRangeRequest *delete_range_req)
     ::eloqstore::TruncateRequest &kv_truncate_req =
         truncate_op->EloqStoreRequest();
     kv_truncate_req.SetArgs(eloq_store_table_id, start_key);
+    kv_truncate_req.SetDsShard(shard_id_);
 
     uint64_t user_data = reinterpret_cast<uint64_t>(truncate_op);
-    if (!eloq_store_service_->ExecAsyn(
-            &kv_truncate_req, user_data, OnDeleteRange))
+    if (!store_->ExecAsyn(&kv_truncate_req, user_data, OnDeleteRange))
     {
         LOG(ERROR) << "Send truncate request to EloqStore failed for table: "
                    << kv_truncate_req.TableId();
@@ -425,10 +516,10 @@ void EloqStoreDataStore::DropTable(DropTableRequest *drop_table_req)
         drop_table_op->EloqStoreRequest();
 
     kv_drop_table_req.SetArgs(std::string(drop_table_req->GetTableName()));
+    kv_drop_table_req.SetDsShard(shard_id_);
 
     uint64_t user_data = reinterpret_cast<uint64_t>(drop_table_op);
-    if (!eloq_store_service_->ExecAsyn(
-            &kv_drop_table_req, user_data, OnDropTable))
+    if (!store_->ExecAsyn(&kv_drop_table_req, user_data, OnDropTable))
     {
         LOG(ERROR) << "Send drop table request to EloqStore failed for table: "
                    << drop_table_req->GetTableName();
@@ -504,9 +595,10 @@ void EloqStoreDataStore::ScanNext(ScanRequest *scan_req)
     kv_scan_req.SetArgs(
         eloq_store_table_id, start_key, end_key, inclusive_start);
     kv_scan_req.SetPagination(batch_size, 0);
+    kv_scan_req.SetDsShard(shard_id_);
 
     uint64_t user_data = reinterpret_cast<uint64_t>(scan_op);
-    if (!eloq_store_service_->ExecAsyn(&kv_scan_req, user_data, OnScanNext))
+    if (!store_->ExecAsyn(&kv_scan_req, user_data, OnScanNext))
     {
         LOG(ERROR) << "Send scan request to EloqStore failed for table: "
                    << kv_scan_req.TableId();
@@ -610,13 +702,14 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
     std::string_view backup_name = req->GetBackupName();
     assert(req->GetBackupTs() != 0);
 
-    if (backup_name.empty() || backup_name == eloq_store_service_->Branch())
+    if (backup_name.empty() || backup_name == store_->Branch())
     {
         // If backup_name is empty or matches the current branch, create
         // snapshot for current branch.
         ::eloqstore::GlobalArchiveRequest global_archive_req;
         global_archive_req.SetTag(std::to_string(req->GetBackupTs()));
-        eloq_store_service_->ExecSync(&global_archive_req);
+        global_archive_req.SetDsShard(shard_id_);
+        store_->ExecSync(&global_archive_req);
 
         ::EloqDS::remote::DataStoreError ds_error;
         std::string error_msg;
@@ -649,7 +742,8 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
         ::eloqstore::GlobalCreateBranchRequest create_branch_req;
         create_branch_req.SetArgs(std::string(backup_name));
         create_branch_req.SetSaltTimestamp(req->GetBackupTs());
-        eloq_store_service_->ExecSync(&create_branch_req);
+        create_branch_req.SetDsShard(shard_id_);
+        store_->ExecSync(&create_branch_req);
 
         ::EloqDS::remote::DataStoreError ds_error;
         std::string error_msg;
@@ -687,7 +781,8 @@ bool EloqStoreDataStore::CreateSnapshotForStandby(uint32_t ng_id,
     global_archive_req.SetAction(
         ::eloqstore::GlobalArchiveRequest::Action::Create);
     global_archive_req.SetTag(std::string(tag));
-    eloq_store_service_->ExecSync(&global_archive_req);
+    global_archive_req.SetDsShard(shard_id_);
+    store_->ExecSync(&global_archive_req);
     if (global_archive_req.Error() != ::eloqstore::KvError::NoError)
     {
         LOG(WARNING) << "CreateSnapshotForStandby failed, tag=" << tag
@@ -706,7 +801,8 @@ void EloqStoreDataStore::DeleteStandbySnapshot(uint64_t term,
         ::eloqstore::GlobalArchiveRequest::Action::Delete);
     global_archive_req.SetTerm(term);
     global_archive_req.SetTag(std::string(tag));
-    eloq_store_service_->ExecSync(&global_archive_req);
+    global_archive_req.SetDsShard(shard_id_);
+    store_->ExecSync(&global_archive_req);
     if (global_archive_req.Error() != ::eloqstore::KvError::NoError)
     {
         LOG(WARNING) << "DeleteStandbySnapshot failed for tag=" << tag
@@ -724,7 +820,8 @@ bool EloqStoreDataStore::ListArchiveTags(std::string_view prefix,
     }
     ::eloqstore::GlobalListArchiveTagsRequest req;
     req.SetPrefix(std::string(prefix));
-    eloq_store_service_->ExecSync(&req);
+    req.SetDsShard(shard_id_);
+    store_->ExecSync(&req);
     if (req.Error() != ::eloqstore::KvError::NoError)
     {
         return false;
@@ -750,16 +847,20 @@ void EloqStoreDataStore::ScanDelete(DeleteRangeRequest *delete_range_req)
     // Delete records from eloqstore async
     ScanDeleteOperationData *scan_del_op =
         eloq_store_scan_del_op_pool_.NextObject();
-    scan_del_op->Reset(delete_range_req, eloq_store_service_.get());
+    scan_del_op->Reset(delete_range_req, store_);
 
     PoolableGuard op_guard(scan_del_op);
 
     ::eloqstore::ScanRequest &kv_scan_req = scan_del_op->EloqStoreScanRequest();
     kv_scan_req.SetArgs(eloq_store_table_id, start_key, end_key, true);
     kv_scan_req.SetPagination(1024, 0);
+    // Both halves of the scan-and-delete loop work for this data shard; the
+    // pooled operation may have served another one before.
+    kv_scan_req.SetDsShard(shard_id_);
+    scan_del_op->EloqStoreWriteRequest().SetDsShard(shard_id_);
 
     uint64_t user_data = reinterpret_cast<uint64_t>(scan_del_op);
-    if (!eloq_store_service_->ExecAsyn(&kv_scan_req, user_data, OnScanDelete))
+    if (!store_->ExecAsyn(&kv_scan_req, user_data, OnScanDelete))
     {
         LOG(ERROR) << "Send scan request to EloqStore failed for table: "
                    << kv_scan_req.TableId();
@@ -952,9 +1053,10 @@ void EloqStoreDataStore::Floor(ScanRequest *scan_req)
 
     ::eloqstore::FloorRequest &kv_floor_req = floor_op->EloqStoreRequest();
     kv_floor_req.SetArgs(eloq_store_table_id, start_key);
+    kv_floor_req.SetDsShard(shard_id_);
 
     uint64_t user_data = reinterpret_cast<uint64_t>(floor_op);
-    if (!eloq_store_service_->ExecAsyn(&kv_floor_req, user_data, OnFloor))
+    if (!store_->ExecAsyn(&kv_floor_req, user_data, OnFloor))
     {
         LOG(ERROR) << "Floor request to EloqStore failed for table: "
                    << kv_floor_req.TableId();
@@ -1007,15 +1109,16 @@ bool EloqStoreDataStore::ReloadData(int64_t term,
     LOG(INFO) << "EloqStoreDataStore::ReloadData, term: " << term
               << ", snapshot_ts: " << snapshot_ts
               << ", from_snapshot: " << from_snapshot;
-    if (eloq_store_service_->Term() != static_cast<uint64_t>(term))
+    if (store_->ShardTerm(shard_id_) != static_cast<uint64_t>(term))
     {
         LOG(ERROR) << "EloqStoreDataStore::ReloadData, term mismatch, "
                       "expected: "
-                   << term << ", actual: " << eloq_store_service_->Term()
+                   << term << ", actual: " << store_->ShardTerm(shard_id_)
                    << ")";
         return false;
     }
     ::eloqstore::GlobalReopenRequest global_reopen_req;
+    global_reopen_req.SetDsShard(shard_id_);
     if (from_snapshot)
     {
         const std::string reopen_tag =
@@ -1031,7 +1134,7 @@ bool EloqStoreDataStore::ReloadData(int64_t term,
                    << term << ", snapshot_ts: " << snapshot_ts
                    << ", tag: <latest>";
     }
-    eloq_store_service_->ExecSync(&global_reopen_req);
+    store_->ExecSync(&global_reopen_req);
 
     if (global_reopen_req.Error() != ::eloqstore::KvError::NoError)
     {
@@ -1050,7 +1153,7 @@ void EloqStoreDataStore::UpdateStandbyMasterStorePaths(
     const std::vector<std::string> &store_paths,
     const std::vector<uint64_t> &store_path_weights)
 {
-    auto res = eloq_store_service_->UpdateStandbyMasterStorePaths(
+    auto res = store_->UpdateStandbyMasterStorePaths(
         std::vector<std::string>(store_paths.begin(), store_paths.end()),
         std::vector<uint64_t>(store_path_weights.begin(),
                               store_path_weights.end()));
@@ -1064,8 +1167,7 @@ void EloqStoreDataStore::UpdateStandbyMasterStorePaths(
 void EloqStoreDataStore::UpdateStandbyMasterAddr(
     const std::string &standby_master_addr)
 {
-    auto res =
-        eloq_store_service_->UpdateStandbyMasterAddr(standby_master_addr);
+    auto res = store_->UpdateStandbyMasterAddr(standby_master_addr);
     if (res != ::eloqstore::KvError::NoError)
     {
         LOG(WARNING) << "UpdateStandbyMasterAddr failed with error: "
