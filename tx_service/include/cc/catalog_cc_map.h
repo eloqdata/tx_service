@@ -322,14 +322,21 @@ public:
         assert(req.IsLocal());
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
-
+        int64_t ng_term = -1;
         if (req.IsInRecovering())
         {
-            ng_term = ng_term > 0
-                          ? ng_term
-                          : Sharder::Instance().CandidateLeaderTerm(ng_id);
+            // A recovering request is also served in the candidate leader
+            // term. The leader term and the candidate leader term come from
+            // one read, so that neither is missed when replay finishes.
+            const NodeGroupTerms terms = Sharder::Instance().LeaderTerms(ng_id);
+            ng_term =
+                std::max(terms.leader_, Sharder::Instance().StandbyNodeTerm());
+            ng_term = ng_term > 0 ? ng_term : terms.candidate_;
+        }
+        else
+        {
+            ng_term = std::max(Sharder::Instance().LeaderTerm(ng_id),
+                               Sharder::Instance().StandbyNodeTerm());
         }
 
         CODE_FAULT_INJECTOR("term_CatalogCcMap_Execute_ReadCc", {

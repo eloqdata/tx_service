@@ -158,6 +158,47 @@ struct ClusterConfig
 };
 
 /**
+ * @brief The leader term and the candidate leader term of a cc node group on
+ * this node, read together by Sharder::LeaderTerms().
+ */
+struct NodeGroupTerms
+{
+    /**
+     * @brief Whether this node is replaying the node group's log and does not
+     * lead the group yet.
+     *
+     * @return true if the candidate leader term is set and the leader term is
+     * not.
+     */
+    bool Replaying() const
+    {
+        return leader_ < 0 && candidate_ > 0;
+    }
+
+    /**
+     * @brief The term in which this node leads the node group or is about to.
+     *
+     * @return The leader term if it is positive, else the candidate leader
+     * term, which is negative when this node is neither.
+     */
+    int64_t LeaderOrCandidate() const
+    {
+        return leader_ > 0 ? leader_ : candidate_;
+    }
+
+    /**
+     * The term in which this node leads the node group; negative if it does
+     * not.
+     */
+    int64_t leader_{-1};
+    /**
+     * The term in which this node is replaying the node group's log before it
+     * leads the group; negative if it is not.
+     */
+    int64_t candidate_{-1};
+};
+
+/**
  * Sharder is the collection of services supplied by TxService, which includes:
  * 1. cc_stream rpc service, which transfers CcRequests between different
  * TxService nodes.
@@ -347,6 +388,26 @@ public:
     int64_t LeaderTerm(uint32_t ng_id) const;
 
     int64_t CandidateLeaderTerm(uint32_t ng_id) const;
+
+    /**
+     * @brief Reads the leader term and the candidate leader term of a cc node
+     * group on this node as one consistent pair.
+     *
+     * The two terms are separate atomics. When log replay finishes, the cc
+     * node publishes the leader term and only then clears the candidate
+     * leader term (CcNode::FinishLogGroupReplay()). This function loads the
+     * candidate leader term first and the leader term second, the reverse of
+     * that order, so the pair it returns never shows both terms unset while
+     * the node passes from candidate leader to leader. Code that looks at
+     * both terms must call this function: LeaderTerm() followed by
+     * CandidateLeaderTerm() can see the old leader term and the new candidate
+     * leader term, and conclude that the node is neither.
+     *
+     * @param ng_id The cc node group ID.
+     * @return The two terms; both negative before the cc nodes are
+     * initialized.
+     */
+    NodeGroupTerms LeaderTerms(uint32_t ng_id) const;
 
     /**
      * @brief Updates the leader cache of all cc node groups.

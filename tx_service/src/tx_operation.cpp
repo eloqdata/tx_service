@@ -3349,16 +3349,26 @@ void SplitFlushRangeOp::ClearInfos()
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 {
-    if (txm->TxStatus() == TxnStatus::Recovering &&
-        Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
+    // The leader term and the candidate leader term, read as one pair. Read
+    // one after the other, both can be missed at the moment replay finishes,
+    // and the recovered split would be dropped although its term is still
+    // valid, leaving its prepare log and its range locks without an owner.
+    const NodeGroupTerms terms =
+        Sharder::Instance().LeaderTerms(txm->TxCcNodeId());
+    if (txm->TxStatus() == TxnStatus::Recovering && terms.leader_ < 0)
     {
         // This is a recovered tx and replay is not done yet. We should wait for
         // replay finish before forwarding tx machine.
-        if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
-            txm->TxTerm())
+        if (terms.candidate_ != txm->TxTerm())
         {
             // Recovered term is invalid. Do not call ForceToFinish as it will
             // cause infinite recursive call. Clean up tx state directly.
+            LOG(WARNING) << "Split Flush transaction recovered in term "
+                         << txm->TxTerm()
+                         << " is dropped, txn: " << txm->TxNumber()
+                         << ", node group #" << txm->TxCcNodeId()
+                         << " leader term " << terms.leader_
+                         << ", candidate leader term " << terms.candidate_;
             txm->bool_resp_->Finish(false);
 
             ClearInfos();
@@ -6415,17 +6425,27 @@ void DataMigrationOp::PrepareNextRoundBuckets()
 
 void DataMigrationOp::Forward(TransactionExecution *txm)
 {
-    if (txm->TxStatus() == TxnStatus::Recovering &&
-        Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
+    // The leader term and the candidate leader term, read as one pair. Read
+    // one after the other, both can be missed at the moment replay finishes,
+    // and the recovered migration would be dropped although its term is still
+    // valid.
+    const NodeGroupTerms terms =
+        Sharder::Instance().LeaderTerms(txm->TxCcNodeId());
+    if (txm->TxStatus() == TxnStatus::Recovering && terms.leader_ < 0)
     {
         // This is a recovered tx and replay is not done yet. We should wait
         // for replay finish before forwarding tx machine.
-        if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
-            txm->TxTerm())
+        if (terms.candidate_ != txm->TxTerm())
         {
             // Recovered term is invalid. Do not call ForceToFinish as it
             // will cause infinite recursive call. Clean up tx state
             // directly.
+            LOG(WARNING) << "Data migration transaction recovered in term "
+                         << txm->TxTerm()
+                         << " is dropped, txn: " << txm->TxNumber()
+                         << ", node group #" << txm->TxCcNodeId()
+                         << " leader term " << terms.leader_
+                         << ", candidate leader term " << terms.candidate_;
             Clear();
             txm->state_stack_.pop_back();
             assert(txm->state_stack_.empty());

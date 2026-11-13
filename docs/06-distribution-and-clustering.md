@@ -83,9 +83,13 @@ NG's only replay request to the log groups
 every node the NG, its new leader and the term (`NotifyNewLeaderStart`, best
 effort). The leader term is
 published only after every log group has completed replay, so normal CC
-requests cannot observe a partially recovered in-memory replica. A synchronized
-standby may retain its warm state and replay only the missing tail; a cold
-candidate rebuilds from storage and WAL.
+requests cannot observe a partially recovered in-memory replica. The candidate
+term is cleared only after the leader term is published, so from election to
+stepdown at least one of the two is set. They are separate values; code that
+needs both reads them as one pair (`Sharder::LeaderTerms()`), candidate term
+first, and so never finds both unset while the node passes from candidate to
+leader. A synchronized standby may retain its warm state and replay only the
+missing tail; a cold candidate rebuilds from storage and WAL.
 
 On stepdown, the serving and candidate terms are invalidated before NG-owned
 memory is released. Code that accesses such memory outside the shard lifecycle
@@ -168,6 +172,7 @@ candidate becomes a complete in-memory replica.
 | Cluster topology, placement functions, leader caches, terms, and data pinning are owned by `Sharder` | `tx_service/include/sharder.h`; `tx_service/src/sharder.cpp` |
 | Election and membership cross the host-manager RPC boundary | `tx_service/include/proto/cc_request.proto`; `tx_service/src/remote/cc_node_service.cpp`; `tx_service/src/sharder.cpp` |
 | An NG becomes serviceable only after leader recovery completes | `tx_service/include/fault/cc_node.h`; `tx_service/src/fault/cc_node.cpp`; `tx_service/src/fault/log_replay_service.cpp` |
+| The leader term and the candidate term are read as one pair, candidate term first | `tx_service/include/sharder.h` (`NodeGroupTerms`, `Sharder::LeaderTerms`); `tx_service/src/fault/cc_node.cpp` (`FinishLogGroupReplay`) |
 | Local and remote requests converge on the CC-request/shard execution model | `tx_service/include/remote/remote_cc_handler.h`; `tx_service/include/remote/remote_cc_request.h`; `tx_service/src/remote/cc_stream_sender.cpp`; `tx_service/src/remote/cc_stream_receiver.cpp` |
 | Cluster configuration and bucket ownership are transactional metadata | `tx_service/include/cc/cluster_config_cc_map.h`; `tx_service/include/cluster_config_record.h`; `tx_service/include/cc/range_bucket_cc_map.h`; `tx_service/src/cc/local_cc_shards.cpp` |
 | Scaling and data migration are resumable transaction operations | `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp`; `tx_service/tx-log-protos/log.proto` |

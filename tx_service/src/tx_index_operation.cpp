@@ -2473,8 +2473,7 @@ void UpsertTableIndexOp::HandleRangeTask(
              &task_value,
              &dispatch_func]()
             {
-                while (Sharder::Instance().LeaderTerm(range_owner) < 0 &&
-                       Sharder::Instance().CandidateLeaderTerm(range_owner) > 0)
+                while (Sharder::Instance().LeaderTerms(range_owner).Replaying())
                 {
                     // Waiting until log replay finished on this node
                     // group. Including data(.pk) log and and

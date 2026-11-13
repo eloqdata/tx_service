@@ -61,13 +61,12 @@ CcNode::CcNode(const uint32_t ng_id,
 bool CcNode::CheckLogGroupReplayFinished(uint32_t log_group_id, int64_t ng_term)
 {
     std::lock_guard<std::mutex> lk(recovery_mux_);
-    int64_t term = Sharder::Instance().LeaderTerm(ng_id_);
-    if (term >= ng_term)
+    const NodeGroupTerms terms = Sharder::Instance().LeaderTerms(ng_id_);
+    if (terms.leader_ >= ng_term)
     {
         return true;
     }
-    int64_t candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
-    if (candidate_term > ng_term)
+    if (terms.candidate_ > ng_term)
     {
         return true;
     }
@@ -122,6 +121,9 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
         recovered_log_groups_.clear();
 
         candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
+        // The leader term is set before the candidate leader term is cleared.
+        // Sharder::LeaderTerms() reads the two in the reverse order and relies
+        // on this one to never see both unset during the hand-over.
         Sharder::Instance().SetLeaderTerm(ng_id_, candidate_term);
         LOG(INFO) << "The leader of cc node group ng#" << ng_id_
                   << " with the term " << candidate_term
@@ -135,18 +137,15 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
 int64_t CcNode::PinData()
 {
     std::unique_lock lk(pinning_threads_mux_);
-    int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id_);
+    // The leader term, or the candidate leader term while the node is
+    // replaying. The two are read as one pair: read one after the other, both
+    // can be missed at the moment replay finishes, and the caller would be
+    // told that this node holds no term.
+    const int64_t leader_term =
+        Sharder::Instance().LeaderTerms(ng_id_).LeaderOrCandidate();
     if (leader_term > 0)
     {
         pinning_threads_++;
-    }
-    else
-    {
-        leader_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
-        if (leader_term > 0)
-        {
-            pinning_threads_++;
-        }
     }
     return leader_term;
 }
@@ -979,8 +978,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
     while (cntl.Failed() || start_follow_resp.error())
     {
-        if (Sharder::Instance().LeaderTerm(ng_id_) > 0 ||
-            Sharder::Instance().CandidateLeaderTerm(ng_id_) > 0 ||
+        if (Sharder::Instance().LeaderTerms(ng_id_).LeaderOrCandidate() > 0 ||
             Sharder::Instance().StandbyNodeTerm() > 0 ||
             Sharder::Instance().CandidateStandbyNodeTerm() > 0)
         {
@@ -1044,8 +1042,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     int64_t standby_term =
         (primary_term << 32) | start_follow_resp.subscribe_id();
     // verify we're not on a newer term.
-    if (Sharder::Instance().LeaderTerm(ng_id_) > 0 ||
-        Sharder::Instance().CandidateLeaderTerm(ng_id_) > 0 ||
+    if (Sharder::Instance().LeaderTerms(ng_id_).LeaderOrCandidate() > 0 ||
         Sharder::Instance().StandbyNodeTerm() > standby_term ||
         Sharder::Instance().CandidateStandbyNodeTerm() > standby_term)
     {
@@ -1262,8 +1259,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         }
 
         // We only need to retry if the message is not delivered.
-        if (Sharder::Instance().LeaderTerm(ng_id_) > 0 ||
-            Sharder::Instance().CandidateLeaderTerm(ng_id_) > 0 ||
+        if (Sharder::Instance().LeaderTerms(ng_id_).LeaderOrCandidate() > 0 ||
             (Sharder::Instance().StandbyNodeTerm() != standby_term &&
              Sharder::Instance().CandidateStandbyNodeTerm() != standby_term))
         {

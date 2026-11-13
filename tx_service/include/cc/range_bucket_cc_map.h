@@ -90,14 +90,15 @@ public:
 
         assert(req.IsLocal());
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        int64_t ng_term = -1;
         if (req.IsInRecovering())
         {
             ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
         }
         else
         {
-            ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
+            ng_term = std::max(Sharder::Instance().LeaderTerm(ng_id),
+                               Sharder::Instance().StandbyNodeTerm());
         }
 
         if (ng_term < 0)
