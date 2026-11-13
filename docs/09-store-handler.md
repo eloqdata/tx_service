@@ -119,7 +119,7 @@ barrier after all batches for the checkpoint have completed.
 EloqStore batch completion establishes durability, so non-MVCC flushes may
 publish entry checkpoint timestamps per completed partition. RocksDB-backed
 batches require `PersistKV`; MVCC also requires archive writes before entries
-become clean and evictable. Lower-term tasks in a merged flush are excluded
+count as flushed and become evictable. Lower-term tasks in a merged flush are excluded
 from both datastore work and checkpoint publication. NG checkpoint timestamps
 and WAL truncation still wait for the entire included round to succeed.
 

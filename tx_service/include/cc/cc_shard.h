@@ -278,8 +278,67 @@ public:
 
     uint32_t SetAsDefaultArena();
 
-    // Check if this heap is full
+    /**
+     * @brief Whether the heap is at its limit, counting reserved bytes as
+     * used.
+     *
+     * A reservation is memory promised to a write whose payload is installed
+     * later (TryReserve()); every admission decision treats it as allocated,
+     * so a reservation and an allocation are refused by the same test. The
+     * output parameters report the allocator's own figures, without the
+     * reservations, for callers that measure physical reclamation.
+     * @param[out] alloc Bytes the allocator reports as allocated, if not null.
+     * @param[out] commit Bytes the allocator reports as committed, if not
+     * null.
+     * @return True when allocated plus reserved bytes reach the limit, or,
+     * with defragmentation enabled, when committed bytes exceed it.
+     */
     bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
+
+    /**
+     * @brief Charges @p bytes to the reservation ledger if they fit.
+     *
+     * Admitted when the allocator's allocated bytes plus the outstanding
+     * reservations plus @p bytes stay within the limit, and the
+     * defragmentation condition of Full() does not hold. A refusal leaves the
+     * ledger unchanged. Admitted or refused, a non-zero request also starts
+     * defragmentation when the heap is fragmented
+     * (StartDefragmentIfNeeded()). Must run on the owning shard.
+     * @param bytes The payload estimate to reserve; zero always succeeds and
+     * changes nothing.
+     * @return True when the bytes were charged.
+     */
+    bool TryReserve(size_t bytes);
+
+    /**
+     * @brief Returns @p bytes previously charged through TryReserve().
+     *
+     * Underflow is an accounting error: the ledger is clamped at zero and the
+     * mismatch is asserted in debug builds rather than wrapped. Must run on
+     * the owning shard.
+     * @param bytes The charge to return.
+     */
+    void ReleaseReservation(size_t bytes);
+
+    /**
+     * @brief Outstanding reserved bytes. Read under the shard ownership
+     * contract: from the owning shard, or through shard-executed work.
+     * @return The ledger value.
+     */
+    size_t ReservedBytes() const
+    {
+        return reserved_bytes_;
+    }
+
+    /**
+     * @brief The allocator's allocated figure alone, without reservations.
+     *
+     * For the cleaner's productivity measure and for diagnostics; admission
+     * decisions use Full() or TryReserve().
+     * @return Allocated bytes as the allocator reports them, or a negative
+     * value when the statistics are unavailable.
+     */
+    int64_t PhysicalAllocated() const;
 
     bool NeedCleanShard(int64_t &alloc, int64_t &commit) const;
 
@@ -299,7 +358,31 @@ public:
                                             (1.0 - clean_target_free_ratio));
     }
 
-    bool NeedDefragment(int64_t *alloc, int64_t *commit) const;
+    /**
+     * @brief Whether the given allocator figures call for defragmentation.
+     *
+     * The heap is fragmented when committed memory is above high_water of the
+     * limit while no more than utilization of it is allocated. Always false
+     * with jemalloc, which this heap cannot defragment.
+     * @param allocated Bytes the allocator reports as allocated.
+     * @param committed Bytes the allocator reports as committed.
+     * @return True when the figures meet the condition.
+     */
+    bool IsFragmented(int64_t allocated, int64_t committed) const;
+
+    /**
+     * @brief Starts defragmentation if it is enabled, the given figures call
+     * for it (IsFragmented()) and none is running (AsyncDefragment()).
+     *
+     * Called wherever a request asks the heap for memory, with the figures
+     * the caller has just read for its own capacity check: entry admission
+     * in the cc map, and payload reservation (TryReserve()). Must run on the
+     * owning shard.
+     * @param allocated Bytes the allocator reports as allocated.
+     * @param committed Bytes the allocator reports as committed.
+     * @return True if this call started defragmentation.
+     */
+    bool StartDefragmentIfNeeded(int64_t allocated, int64_t committed);
 
     mi_heap_t *Heap() const
     {
@@ -335,10 +418,23 @@ public:
     }
 
 private:
+    /**
+     * @brief Reads the allocator's figures for this heap.
+     * @param[out] alloc Allocated bytes.
+     * @param[out] commit Committed bytes.
+     */
+    void AllocatorStats(int64_t &alloc, int64_t &commit) const;
+
     CcShard *cc_shard_{nullptr};
     mi_heap_t *heap_{nullptr};
     const size_t memory_limit_{0};
     size_t last_failed_collect_ts_{0};
+    /**
+     * Bytes promised to writes whose payloads are not installed yet: the sum
+     * of the charges owned by pending acquire requests and by granted write
+     * locks on this shard. Written only by the owning shard.
+     */
+    size_t reserved_bytes_{0};
 
     // defrag heap cc for this shard
     std::unique_ptr<DefragShardHeapCc> defrag_heap_cc_{nullptr};
@@ -467,8 +563,11 @@ public:
      * its limit after its last release, whoever parked (see
      * MemoryParkCount()). A cleaner that is
      * already sweeping or deferred is left alone: the request joins the wait
-     * list and the pass or retry in progress covers it. Must run on the
-     * owning shard.
+     * list and the pass or retry in progress covers it. A request parking for
+     * the first time since it was taken into use is stamped with the node's
+     * concluded checkpoint cycle count (CcRequestBase::MemoryParkStamp());
+     * the stamp survives release and re-park so the cleaner can tell how many
+     * cycles the request has been waiting. Must run on the owning shard.
      * @param req The pointer to the cc request.
      */
     void EnqueueWaitListIfMemoryFull(CcRequestBase *req);
@@ -479,9 +578,40 @@ public:
      */
     bool DequeueWaitListAfterMemoryFree(bool deque_all = false);
     /**
-     * @brief Abort the cc requests whose tx is holding a range read lock.
+     * @brief Rejects parked requests that may not keep waiting, with
+     * OUT_OF_MEMORY.
+     *
+     * Each request's CcRequestBase::MemoryWaitPolicy() decides. A
+     * MemoryWait::kFailFast request is rejected when @p reject_fail_fast is
+     * set, which the cleaner does at the end of a pass that is full or freed
+     * nothing. A MemoryWait::kFailFast or MemoryWait::kBounded request that
+     * has stayed parked across FLAGS_shard_memory_wait_ckpt_cycles concluded
+     * checkpoint cycles is rejected regardless: a cycle is a flush or the
+     * finding that nothing can be flushed, so the request has had that many
+     * chances and whatever holds the memory it needs is held by transactions
+     * that are not finishing. A MemoryWait::kUnbounded request (log replay, a
+     * write forwarded to a standby) is never rejected. Each rejected request
+     * is unlinked before its abort hook runs, since that hook may free it.
+     * Must run on the owning shard.
+     * @param reject_fail_fast Whether MemoryWait::kFailFast requests are
+     * rejected on this call regardless of how long they have waited.
      */
-    void AbortRequestsAfterMemoryFree();
+    void AbortRequestsAfterMemoryFree(bool reject_fail_fast = true);
+
+    /**
+     * @brief Whether a request that first parked for memory at @p stamp has
+     * stayed parked across FLAGS_shard_memory_wait_ckpt_cycles concluded
+     * checkpoint cycles.
+     *
+     * The one statement of the cycle bound, for the cleaner
+     * (AbortRequestsAfterMemoryFree()) and for a request that applies the
+     * bound to the requests waiting on it (FetchRecordCc). It does not look
+     * at the request's wait policy; the caller does.
+     * @param stamp CcRequestBase::MemoryParkStamp() of the request.
+     * @return False when the request never parked (stamp 0) or the bound is
+     * disabled (the flag is 0).
+     */
+    bool MemoryWaitCyclesExhausted(uint64_t stamp) const;
 
     size_t WaitListSizeForMemory();
 
@@ -513,10 +643,11 @@ public:
      * @brief Consumes the mark left by a flush or split that completed while
      * an eviction pass was running.
      *
-     * The pass in progress is not rewound. It finishes, then runs once more
-     * from the LRU head to reach entries the flush made evictable behind its
-     * cursor. The cleaner also clears the mark when it starts a pass, since a
-     * new pass visits every page anyway.
+     * The pass in progress is not rewound. It finishes without asking for a
+     * checkpoint, then runs once more from the LRU head to reach entries the
+     * flush made evictable behind its cursor; that pass decides whether to
+     * ask. The cleaner also clears the mark when it starts a pass, since a new
+     * pass visits every page anyway.
      * @return Whether such a completion was recorded.
      */
     bool TakeCleanRescanRequest()
@@ -533,9 +664,10 @@ public:
      * (FireCleanRetryIfDue()), or a flush or split completion does so earlier
      * (OnDirtyDataFlushed()). Must run on the owning shard.
      * @param productive Whether the pass reclaimed at least
-     * FLAGS_shard_clean_release_kb (see ShardCleanCc::Execute()). A pass
-     * under that doubles the delay up to kCleanRetryMaxBackoff steps; one at
-     * or above it resets the delay to the base.
+     * FLAGS_shard_clean_release_kb over the whole pass (see
+     * ShardCleanCc::Execute()). A pass under that found almost nothing
+     * evictable and doubles the delay up to kCleanRetryMaxBackoff steps; one
+     * at or above it resets the delay to the base.
      */
     void DeferCleanPass(bool productive);
 
@@ -691,6 +823,14 @@ public:
      */
     void NotifyCkpt(bool request_ckpt = true,
                     const char *reason = "explicit_request");
+
+    /**
+     * @brief Whether a data sync operation of any origin, for any node group,
+     * is running on this node (Checkpointer::IsOngoingDataSync()).
+     * @return false for a shard without a checkpointer (ckpter_ is set by the
+     * checkpointer's constructor).
+     */
+    bool IsOngoingDataSync() const;
 
     /**
      * @brief Dispatch heavy cpu-bound task, e.g. StoreRange::LoadSlice().
@@ -1704,6 +1844,15 @@ private:
     uint64_t dirty_memory_threshold_bytes_{0};
 
     Checkpointer *ckpter_;
+
+    /**
+     * @brief The node's concluded checkpoint cycle count
+     * (Checkpointer::ConcludedCkptCycles()), which ages requests parked for
+     * memory.
+     * @return The count; 0 for a shard without a checkpointer (ckpter_ is
+     * set by the checkpointer's constructor), where no cycle ever concludes.
+     */
+    uint64_t ConcludedCkptCycles() const;
 
     /**
      * @brief The variable via which the dedicated processing thread notifies

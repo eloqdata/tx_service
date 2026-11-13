@@ -976,4 +976,269 @@ TEST_CASE("FetchRecordCc reopen retry releases its active owner",
 }
 #endif
 
+namespace
+{
+/** The map a point read on a hash-partitioned table runs against. */
+using PointReadCcMap =
+    TemplateCcMap<CompositeKey<int>, CompositeRecord<int>, true, false>;
+/** An entry of PointReadCcMap. */
+using PointReadCcEntry =
+    CcEntry<CompositeKey<int>, CompositeRecord<int>, true, false>;
+
+/** The value the store holds for every key in the point-read tests. */
+constexpr int kStoredValue = 4242;
+/** The commit timestamp the store reports for that value. */
+constexpr uint64_t kStoredCommitTs = 9;
+
+/**
+ * @brief A store that answers every record fetch with one stored value and
+ * leaves completing the fetch to the test.
+ *
+ * FetchRecord() fills the answer in and returns; the test then calls the
+ * fetch's SetFinish(), as the store's callback thread would.
+ */
+class AnsweringStore : public EloqDS::DataStoreServiceClient
+{
+public:
+    /**
+     * @param catalog_factories The catalog factories of the fixture.
+     * @param cluster_manager The data store cluster the client is given.
+     */
+    AnsweringStore(
+        CatalogFactory *catalog_factories[3],
+        const EloqDS::DataStoreServiceClusterManager &cluster_manager)
+        : DataStoreServiceClient(
+              false, catalog_factories, cluster_manager, false)
+    {
+    }
+
+    store::DataStoreHandler::DataStoreOpStatus FetchRecord(
+        FetchRecordCc *fetch, FetchSnapshotCc *) override
+    {
+        fetch->rec_status_ = RecordStatus::Normal;
+        fetch->rec_ts_ = kStoredCommitTs;
+        fetch->rec_str_.clear();
+        CompositeRecord<int>(kStoredValue).Serialize(fetch->rec_str_);
+        fetches_.push_back(fetch);
+        return store::DataStoreHandler::DataStoreOpStatus::Success;
+    }
+
+    std::vector<FetchRecordCc *> fetches_;  ///< Fetches issued so far.
+};
+
+/**
+ * @brief Gives node group 0 a valid leader term for one test and puts the
+ * fixture's "no leader" state back afterwards.
+ *
+ * FetchRecordFixture leaves every term at -1, which is enough for the fetch
+ * lifecycle tests above but makes a real read fail as "not leader".
+ */
+struct ScopedLeaderTerm
+{
+    ScopedLeaderTerm()
+    {
+        Sharder &sharder = Sharder::Instance();
+        sharder.cc_nodes_init_.store(true, std::memory_order_release);
+        sharder.leader_term_cache_[0].store(1, std::memory_order_release);
+    }
+
+    ~ScopedLeaderTerm()
+    {
+        Sharder &sharder = Sharder::Instance();
+        sharder.leader_term_cache_[0].store(-1, std::memory_order_release);
+        sharder.cc_nodes_init_.store(false, std::memory_order_release);
+    }
+};
+
+/**
+ * @brief One real point read of a key, with its result, issued the way the
+ * local handler issues it.
+ */
+struct PointRead
+{
+    /**
+     * @param table The table read.
+     * @param cc_map The table's cc map. It is not registered in the shard, so
+     * the read is pointed at it directly, as a read is after its first
+     * lookup.
+     * @param key The key read.
+     * @param abort_if_oom Whether the read fails fast for memory, as a read
+     * holding a range read lock does.
+     */
+    PointRead(const TableName &table,
+              PointReadCcMap &cc_map,
+              int key,
+              bool abort_if_oom)
+        : key_(key), tx_key_(&key_), result_(nullptr)
+    {
+        result_.Value().Reset();
+        read_.Use();
+        read_.Reset(&table,
+                    /*schema_version=*/1,
+                    &tx_key_,
+                    /*key_shard_code=*/0,
+                    &value_,
+                    ReadType::Inside,
+                    /*tx_number=*/1,
+                    /*tx_term=*/1,
+                    /*ts=*/0,
+                    &result_,
+                    IsolationLevel::ReadCommitted,
+                    CcProtocol::OCC,
+                    /*is_for_write=*/false,
+                    /*is_covering_keys=*/false,
+                    /*archives=*/nullptr,
+                    /*is_in_recovering=*/false,
+                    /*point_read_on_miss=*/false,
+                    /*partition_id=*/0,
+                    abort_if_oom);
+        read_.ccm_ = &cc_map;
+    }
+
+    CompositeKey<int> key_;                  ///< The key read.
+    TxKey tx_key_;                           ///< Borrowed view of key_.
+    CompositeRecord<int> value_;             ///< Where the read puts the value.
+    CcHandlerResult<ReadKeyResult> result_;  ///< The read's result.
+    ReadCc read_;                            ///< The request.
+};
+
+/**
+ * @brief Runs the shard until its queue is empty.
+ * @param shard The shard to run.
+ */
+void DrainShard(CcShard &shard)
+{
+    // The cleaner re-enqueues itself between batches; a bound keeps a bug
+    // from turning into a hang.
+    for (int round = 0; round < 1000; ++round)
+    {
+        if (shard.ProcessRequests() == 0)
+        {
+            return;
+        }
+    }
+    FAIL("the shard queue did not drain");
+}
+
+/**
+ * @brief Reserves everything above the allocator's figure, so the heap is
+ * full on reservations alone.
+ * @param heap The shard heap.
+ * @return The amount reserved, to release later.
+ */
+size_t FillHeap(CcShardHeap &heap)
+{
+    const size_t fill =
+        heap.MemoryLimit() - static_cast<size_t>(heap.PhysicalAllocated());
+    REQUIRE(heap.TryReserve(fill));
+    REQUIRE(heap.Full());
+    return fill;
+}
+
+/**
+ * @brief Looks up the entry of a key without creating it.
+ * @param cc_map The map.
+ * @param key The key.
+ * @return The entry, or null if the key has none.
+ */
+PointReadCcEntry *FindEntry(PointReadCcMap &cc_map, int key)
+{
+    auto it = cc_map.Find(CompositeKey<int>(key));
+    return it->second;
+}
+}  // namespace
+
+TEST_CASE(
+    "A point read on a cache miss waits for memory before its record is "
+    "installed",
+    "[fetch-record][memory]")
+{
+    CatalogFactory *catalog_factories[3] = {
+        &mock_catalog_factory, &mock_catalog_factory, &mock_catalog_factory};
+    EloqDS::DataStoreServiceClusterManager cluster_manager;
+    AnsweringStore store(catalog_factories, cluster_manager);
+    FetchRecordFixture fixture(&store);
+    ScopedLeaderTerm leader_term;
+    CcShard &shard = fixture.shard;
+    CcShardHeap *heap = shard.GetShardHeap();
+    REQUIRE(heap != nullptr);
+
+    const TableName table{std::string_view("point_read_memory"),
+                          TableType::Primary,
+                          TableEngine::EloqSql};
+    MockTableSchema schema(table, "", 1);
+    // Not every key is cached, so a read of an uncached key asks the store.
+    PointReadCcMap cc_map(
+        &shard, 0, table, 1, &schema, /*ccm_has_full_entries=*/false);
+
+    SECTION("the read waits while the record does not fit, then completes")
+    {
+        PointRead point_read(table, cc_map, 7, /*abort_if_oom=*/false);
+
+        // The read misses the cache and issues a store fetch.
+        REQUIRE_FALSE(point_read.read_.Execute(shard));
+        REQUIRE(store.fetches_.size() == 1);
+        FetchRecordCc *fetch = store.fetches_.front();
+        PointReadCcEntry *cce = FindEntry(cc_map, 7);
+        REQUIRE(cce != nullptr);
+        REQUIRE(shard.fetch_record_reqs_.contains(cce));
+        REQUIRE_FALSE(point_read.result_.IsFinished());
+
+        // The store answers while the heap is full: the fetch parks, the
+        // cleaner runs a pass that finds nothing to evict and defers, and the
+        // read stays blocked with nothing installed.
+        const size_t fill = FillHeap(*heap);
+        fetch->SetFinish(0);
+        DrainShard(shard);
+        REQUIRE(shard.WaitListSizeForMemory() == 1);
+        REQUIRE(cce->PayloadStatus() == RecordStatus::Unknown);
+        REQUIRE_FALSE(point_read.result_.IsFinished());
+
+        // Room again. The cleaner's deferred retry releases the fetch, which
+        // installs the record and resumes the read.
+        heap->ReleaseReservation(fill);
+        shard.FireCleanRetryIfDue(UINT64_MAX);
+        DrainShard(shard);
+        REQUIRE(shard.WaitListSizeForMemory() == 0);
+        REQUIRE(point_read.result_.IsFinished());
+        REQUIRE_FALSE(point_read.result_.IsError());
+        REQUIRE(point_read.result_.Value().rec_status_ == RecordStatus::Normal);
+        REQUIRE(point_read.result_.Value().ts_ == kStoredCommitTs);
+        REQUIRE(std::get<0>(point_read.value_.Tuple()) == kStoredValue);
+        REQUIRE(cce->PayloadStatus() == RecordStatus::Normal);
+        REQUIRE_FALSE(shard.fetch_record_reqs_.contains(cce));
+        REQUIRE(cce->GetKeyGapLockAndExtraData() == nullptr);
+        REQUIRE(heap->ReservedBytes() == 0);
+    }
+
+    SECTION("a fail-fast read is rejected by the cleaner's pass")
+    {
+        PointRead point_read(table, cc_map, 8, /*abort_if_oom=*/true);
+
+        REQUIRE_FALSE(point_read.read_.Execute(shard));
+        REQUIRE(store.fetches_.size() == 1);
+        FetchRecordCc *fetch = store.fetches_.front();
+        PointReadCcEntry *cce = FindEntry(cc_map, 8);
+        REQUIRE(cce != nullptr);
+
+        // The store answers while the heap is full: the fetch parks, and the
+        // cleaner's pass, which ends with the heap still full, rejects it
+        // because the read waiting on it fails fast.
+        const size_t fill = FillHeap(*heap);
+        fetch->SetFinish(0);
+        DrainShard(shard);
+        REQUIRE(shard.WaitListSizeForMemory() == 0);
+        REQUIRE(point_read.result_.IsFinished());
+        REQUIRE(point_read.result_.IsError());
+        REQUIRE(point_read.result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY);
+        REQUIRE_FALSE(shard.fetch_record_reqs_.contains(cce));
+        // Nothing was installed, and the fetch's pin and the read's are gone.
+        REQUIRE(cce->PayloadStatus() == RecordStatus::Unknown);
+        REQUIRE(cce->GetKeyGapLockAndExtraData() == nullptr);
+
+        heap->ReleaseReservation(fill);
+        REQUIRE(heap->ReservedBytes() == 0);
+    }
+}
+
 }  // namespace txservice

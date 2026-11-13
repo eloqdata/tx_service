@@ -183,16 +183,53 @@ void DataSyncStatus::RecordCheckpointFailure(CheckpointFailureReason reason)
     }
 }
 
+bool CkptCycle::Release()
+{
+    const uint32_t before = open_count_.fetch_sub(1, std::memory_order_acq_rel);
+    assert(before > 0);
+    if (before != 1)
+    {
+        return false;
+    }
+    Sharder::Instance().GetCheckpointer()->OnCkptCycleConcluded();
+    return true;
+}
+
+void DataSyncStatus::JoinCkptCycle(std::shared_ptr<CkptCycle> cycle)
+{
+    assert(ckpt_cycle_ == nullptr);
+    cycle->BeginNodeGroup();
+    ckpt_cycle_ = std::move(cycle);
+}
+
+void DataSyncStatus::LeaveCkptCycle()
+{
+    assert(ckpt_cycle_ != nullptr);
+    std::shared_ptr<CkptCycle> cycle = std::move(ckpt_cycle_);
+    cycle->ConcludeNodeGroup();
+}
+
 std::optional<DataSyncStatus::CheckpointResult>
 DataSyncStatus::TryFinalizeCheckpointLocked()
 {
     if (origin_ != Origin::Checkpoint || checkpoint_finalized_ ||
-        !all_task_started_ || unfinished_tasks_ != 0)
+        unfinished_tasks_ != 0)
     {
         return std::nullopt;
     }
 
     checkpoint_finalized_ = true;
+    if (ckpt_cycle_ != nullptr)
+    {
+        // Every outcome (success, failure, cancellation, skipped entries,
+        // merged) concludes this node group's flush in the cycle: the cycle
+        // has its verdict on the node group's data. A merged data sync
+        // operation gets here only once the task it was merged into has ended,
+        // since that task counts as one of its unfinished tasks
+        // (DataSyncTask::AbsorbStatus()).
+        std::shared_ptr<CkptCycle> cycle = std::move(ckpt_cycle_);
+        cycle->ConcludeNodeGroup();
+    }
     if (IsCheckpointCancellation(err_code_))
     {
         return CheckpointResult{CheckpointOutcome::Canceled,
@@ -214,6 +251,42 @@ DataSyncStatus::TryFinalizeCheckpointLocked()
     }
     return CheckpointResult{CheckpointOutcome::Success,
                             CheckpointFailureReason::None};
+}
+
+bool DataSyncStatus::EndTaskLocked()
+{
+    // Registered before any worker could run it (RegisterTasks), counted by
+    // DataSyncTask::AbsorbStatus(), or the coordinator's count.
+    assert(unfinished_tasks_ > 0);
+    unfinished_tasks_--;
+    return unfinished_tasks_ == 0;
+}
+
+bool DataSyncStatus::EndEnqueuingLocked()
+{
+    assert(unfinished_scan_tasks_ > 0);
+    unfinished_scan_tasks_--;
+    return EndTaskLocked();
+}
+
+std::optional<DataSyncStatus::CheckpointResult> DataSyncStatus::FinishLocked(
+    CcHandlerResult<Void> *task_res)
+{
+    std::optional<CheckpointResult> checkpoint_result =
+        TryFinalizeCheckpointLocked();
+    if (task_res != nullptr)
+    {
+        if (err_code_ == CcErrorCode::NO_ERROR)
+        {
+            task_res->SetFinished();
+        }
+        else
+        {
+            task_res->SetError(err_code_);
+        }
+    }
+    cv_.notify_all();
+    return checkpoint_result;
 }
 
 DataSyncTask::DataSyncTask(const TableName &table_name,
@@ -284,7 +357,7 @@ void DataSyncTask::SetFinish()
 {
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
     std::optional<DataSyncStatus::CheckpointResult> checkpoint_result;
-    status_->unfinished_tasks_--;
+    const bool last_task = status_->EndTaskLocked();
     // The default value of `truncate_log_ts_` is `0`.
     if (status_->truncate_log_ts_ == 0)
     {
@@ -298,7 +371,7 @@ void DataSyncTask::SetFinish()
             std::min(status_->truncate_log_ts_, data_sync_ts_);
     }
 
-    if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
+    if (last_task)
     {
         if (status_->need_truncate_log_)
         {
@@ -358,23 +431,55 @@ void DataSyncTask::SetFinish()
             }
         }
 
-        checkpoint_result = status_->TryFinalizeCheckpointLocked();
-
-        if (task_res_)
-        {
-            if (status_->err_code_ == CcErrorCode::NO_ERROR)
-            {
-                task_res_->SetFinished();
-            }
-            else
-            {
-                task_res_->SetError(status_->err_code_);
-            }
-        }
-        status_->cv_.notify_all();
+        checkpoint_result = status_->FinishLocked(task_res_);
     }
     task_sender_lk.unlock();
     ReportCheckpointResult(*status_, checkpoint_result);
+    ReleaseAbsorbedStatuses();
+}
+
+void DataSyncTask::AbsorbStatus(std::shared_ptr<DataSyncStatus> status)
+{
+    // A task that has released its attached statuses is no longer any
+    // limiter's ckpt_flush_task_; attaching now would never be released.
+    assert(!absorbed_released_.load(std::memory_order_acquire));
+    {
+        std::lock_guard<std::mutex> lk(status->mux_);
+        // The data sync operation's coordinator is still enqueuing, so its
+        // count is held.
+        assert(status->unfinished_tasks_ > 0);
+        status->unfinished_tasks_++;
+        // Counted apart as well: this task is not one of the data sync
+        // operation's own, so it does not make it wait for the flush buffer
+        // (DataSyncStatus::WaitsForFlushBufferLocked()).
+        status->absorbed_tasks_++;
+    }
+    absorbed_statuses_.push_back(std::move(status));
+}
+
+void DataSyncTask::ReleaseAbsorbedStatuses()
+{
+    absorbed_released_.store(true, std::memory_order_release);
+    for (std::shared_ptr<DataSyncStatus> &absorbed : absorbed_statuses_)
+    {
+        std::unique_lock<std::mutex> lk(absorbed->mux_);
+        // A merged data sync operation neither truncates the log nor has a
+        // result handle, so its last task needs no work of its own. It keeps
+        // no error: this task's own data sync operation reports a failure
+        // once.
+        assert(absorbed->absorbed_tasks_ > 0);
+        absorbed->absorbed_tasks_--;
+        if (absorbed->EndTaskLocked())
+        {
+            std::optional<DataSyncStatus::CheckpointResult> checkpoint_result =
+                absorbed->FinishLocked(nullptr);
+            // Reported outside the data sync operation's mutex: the report
+            // takes the checkpointer's metrics mutex.
+            lk.unlock();
+            ReportCheckpointResult(*absorbed, checkpoint_result);
+        }
+    }
+    absorbed_statuses_.clear();
 }
 
 void DataSyncTask::SetError(
@@ -383,7 +488,7 @@ void DataSyncTask::SetError(
 {
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
     std::optional<DataSyncStatus::CheckpointResult> checkpoint_result;
-    status_->unfinished_tasks_--;
+    const bool last_task = status_->EndTaskLocked();
     status_->err_code_ = err_code;
     if (status_->origin_ == DataSyncStatus::Origin::Checkpoint &&
         !IsCheckpointCancellation(err_code) &&
@@ -405,25 +510,20 @@ void DataSyncTask::SetError(
             std::min(status_->truncate_log_ts_, data_sync_ts_);
     }
 
-    if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
+    if (last_task)
     {
-        checkpoint_result = status_->TryFinalizeCheckpointLocked();
-        if (task_res_)
-        {
-            task_res_->SetError(status_->err_code_);
-        }
-        status_->cv_.notify_all();
+        checkpoint_result = status_->FinishLocked(task_res_);
     }
     task_sender_lk.unlock();
     ReportCheckpointResult(*status_, checkpoint_result);
+    ReleaseAbsorbedStatuses();
 }
 
 void DataSyncTask::SetScanTaskFinished()
 {
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
     status_->unfinished_scan_tasks_--;
-    if (status_->unfinished_scan_tasks_ == 0 && status_->all_task_started_ &&
-        status_->unfinished_tasks_ != 0)
+    if (status_->WaitsForFlushBufferLocked())
     {
         // If all scan tasks are finished, but there are still unfinished data
         // sync task due to pending flush, flush the current flush buffer.

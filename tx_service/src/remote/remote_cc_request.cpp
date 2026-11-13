@@ -127,7 +127,8 @@ void txservice::remote::RemoteAcquire::Reset(
                      req.vec_idx(),
                      ToLocalType::ConvertProtocol(req.protocol()),
                      ToLocalType::ConvertIsolation(req.iso_level()),
-                     req.abort_if_oom());
+                     req.abort_if_oom(),
+                     static_cast<size_t>(req.reserve_bytes()));
 
     input_msg_ = std::move(input_msg);
 

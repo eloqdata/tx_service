@@ -38,9 +38,24 @@
 namespace txservice
 {
 class LocalCcShards;
+class CcHandlerResultBase;
+struct AcquireKeyResult;
+enum class AckStatus : unsigned char;
 
 namespace remote
 {
+/**
+ * @brief Applies the reply to a blocked-request probe to one slot of an
+ * acquire result. Only CcStreamReceiver calls it; it is declared here so that
+ * PayloadReservation-Test can call it without a remote node.
+ * @param slot The slot the probe asked about.
+ * @param hd_res The acquire result the slot belongs to.
+ * @param status The remote node's answer.
+ */
+void ApplyAcquireBlockCheckStatus(AcquireKeyResult &slot,
+                                  CcHandlerResultBase &hd_res,
+                                  AckStatus status);
+
 class CcStreamReceiver : public brpc::StreamInputHandler, public CcStreamService
 {
 public:

@@ -104,6 +104,8 @@ set(OWN_MAIN_TESTS
     MemDataStore-Test
     TxConsistency-Test
     TestNodeSmoke-Test
+    PayloadReservation-Test
+    CkptCycle-Test
 )
 
 function(add_substrate_test name catch_lib)

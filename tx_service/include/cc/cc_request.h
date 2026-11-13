@@ -133,10 +133,26 @@ public:
         }
     }
 
+    /**
+     * @brief Hook run before this dispatcher publishes a terminal error on
+     * the request's behalf, such as a failed term check on a resumed
+     * request.
+     *
+     * The default does nothing. A request that owns shard resources across
+     * a wait (AcquireCc's payload reservation) overrides it to return them,
+     * so that a failure the map never sees still cleans up before the result
+     * is published.
+     * @param err_code The error about to be published.
+     */
+    virtual void OnDispatcherError(CcErrorCode err_code)
+    {
+    }
+
     bool Execute(CcShard &ccs) override
     {
         if (!ValidTermCheck())
         {
+            OnDispatcherError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             res_->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
@@ -347,10 +363,36 @@ protected:
     bool parallel_req_{false};
 };
 
+/**
+ * @brief Commit-time write-lock acquisition for one key on one shard.
+ *
+ * Besides the lock, the request owns a payload reservation while it is
+ * pending: before it tries the write lock it charges the shard heap with the
+ * estimated size of the value the transaction will install in PostWrite, so
+ * admission sees memory promised to writers that have not installed yet. The
+ * charge moves to the granted write lock on success, returns to the heap on
+ * every terminal failure, and stays on the request while it waits in a lock
+ * queue. A request that finds its own transaction's write lock already on the
+ * entry (a re-sent acquisition) takes no charge: the lock keeps the one it was
+ * granted with. See
+ * docs/plans/2026-10-29-payload-reservation-before-write-lock.md.
+ */
 struct AcquireCc
     : public TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>
 {
 public:
+    /** Who owns the payload charge of the current attempt. */
+    enum class ReservePhase : uint8_t
+    {
+        /** Nothing charged: a fresh attempt, or parked for memory. */
+        kUncharged = 0,
+        /** The request charged the heap and still owns the charge. */
+        kRequestOwned,
+        /** The charge is on the write lock, transferred on grant or already
+         *  there from an earlier grant to the same transaction. */
+        kLockOwned
+    };
+
     AcquireCc()
         : key_ptr_(nullptr),
           key_str_(nullptr),
@@ -366,6 +408,11 @@ public:
     AcquireCc(const AcquireCc &rhs) = delete;
     AcquireCc(AcquireCc &&rhs) = delete;
 
+    /**
+     * @brief Resets the request for a local acquisition.
+     * @param reserve_bytes Payload estimate to reserve on the destination
+     * shard before the lock attempt; 0 for deletes and payload-less callers.
+     */
     void Reset(const TableName *tname,
                const uint64_t schema_version,
                const TxKey *key,
@@ -378,7 +425,8 @@ public:
                uint32_t hd_res_idx,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool abort_if_oom)
+               bool abort_if_oom,
+               size_t reserve_bytes = 0)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
@@ -395,8 +443,14 @@ public:
         is_local_ = true;
         block_by_lock_ = false;
         abort_if_oom_ = abort_if_oom;
+        ResetReservation(reserve_bytes);
     }
 
+    /**
+     * @brief Resets the request for a remote acquisition.
+     * @param reserve_bytes Payload estimate sent by the coordinator; 0 from
+     * coordinators that predate the field.
+     */
     void Reset(const TableName *tname,
                uint64_t schema_version,
                const std::string *key_str,
@@ -409,7 +463,8 @@ public:
                uint32_t hd_res_idx,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool abort_if_oom)
+               bool abort_if_oom,
+               size_t reserve_bytes = 0)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
@@ -426,6 +481,153 @@ public:
         is_local_ = false;
         block_by_lock_ = false;
         abort_if_oom_ = abort_if_oom;
+        ResetReservation(reserve_bytes);
+    }
+
+    /** @return The payload estimate this attempt reserves. */
+    size_t RequestedBytes() const
+    {
+        return requested_bytes_;
+    }
+
+    /** @return Who owns the charge of the current attempt. */
+    ReservePhase Phase() const
+    {
+        return phase_;
+    }
+
+    /** @return Bytes currently charged to the heap on this request's behalf. */
+    size_t OwnedBytes() const
+    {
+        return owned_bytes_;
+    }
+
+    /**
+     * @brief Charges the requested bytes to @p heap before the lock attempt.
+     *
+     * Fails only when the bytes do not fit; nothing is charged then and the
+     * caller parks the request for memory. A null heap (no shard memory
+     * limit) or a zero budget charges nothing and succeeds. Must run on the
+     * owning shard.
+     * @param heap The destination shard's heap, or null.
+     * @return True when the request now owns its charge.
+     */
+    bool ChargeReservation(CcShardHeap *heap)
+    {
+        assert(phase_ == ReservePhase::kUncharged && owned_bytes_ == 0);
+        if (heap != nullptr && requested_bytes_ != 0)
+        {
+            if (!heap->TryReserve(requested_bytes_))
+            {
+                return false;
+            }
+            owned_bytes_ = requested_bytes_;
+            charged_heap_ = heap;
+        }
+        phase_ = ReservePhase::kRequestOwned;
+        return true;
+    }
+
+    /**
+     * @brief Records that the entry's write lock, already held by this
+     * transaction, owns the charge. No new charge is taken.
+     */
+    void MarkReservationLockOwned()
+    {
+        assert(phase_ == ReservePhase::kUncharged && owned_bytes_ == 0);
+        phase_ = ReservePhase::kLockOwned;
+    }
+
+    /**
+     * @brief Proceeds without a charge, for tables that entry admission also
+     * exempts from the shard memory limit.
+     *
+     * The sequence table hands out range ids, and range split commits
+     * through it to free memory; parking its acquisition for memory would
+     * make reclamation wait for itself. The attempt then behaves like a
+     * zero-byte reservation: it owns nothing, and the transfer on grant moves
+     * nothing.
+     */
+    void ExemptReservation()
+    {
+        assert(phase_ == ReservePhase::kUncharged && owned_bytes_ == 0);
+        phase_ = ReservePhase::kRequestOwned;
+    }
+
+    /**
+     * @brief Returns the request-owned charge to the heap, if any.
+     *
+     * The single rollback for every terminal failure of a pending
+     * acquisition: immediate conflicts, dispatcher errors, cancellation from
+     * a lock queue, and external abort. Idempotent, and a no-op once the
+     * charge has moved to the lock.
+     */
+    void ReleaseRequestReservation()
+    {
+        if (phase_ != ReservePhase::kRequestOwned)
+        {
+            return;
+        }
+        if (owned_bytes_ != 0)
+        {
+            assert(charged_heap_ != nullptr);
+            charged_heap_->ReleaseReservation(owned_bytes_);
+            owned_bytes_ = 0;
+        }
+        charged_heap_ = nullptr;
+        phase_ = ReservePhase::kUncharged;
+    }
+
+    /**
+     * @brief Moves the request-owned charge onto the granted write lock.
+     *
+     * The heap's ledger does not change: the same bytes change owner. A
+     * request whose charge is already lock-owned (held-lock shortcut) is left
+     * alone, so a post-grant retry cannot transfer twice.
+     * @param lock The write lock this transaction now holds on the entry.
+     */
+    void TransferReservationToLock(NonBlockingLock *lock)
+    {
+        if (phase_ != ReservePhase::kRequestOwned)
+        {
+            assert(phase_ == ReservePhase::kLockOwned);
+            return;
+        }
+        if (owned_bytes_ != 0)
+        {
+            assert(lock != nullptr);
+            lock->AddReservedBytes(owned_bytes_);
+            owned_bytes_ = 0;
+        }
+        charged_heap_ = nullptr;
+        phase_ = ReservePhase::kLockOwned;
+    }
+
+    /**
+     * @brief Returns the request-owned charge before the result is
+     * published, then completes the request with @p err_code.
+     * @param err_code The error to publish.
+     */
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        ReleaseRequestReservation();
+        TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::
+            AbortCcRequest(err_code);
+    }
+
+    void OnDispatcherError(CcErrorCode err_code) override
+    {
+        ReleaseRequestReservation();
+    }
+
+    /**
+     * @brief Returns the request to its pool. A charge still owned here is a
+     * missing terminal cleanup, not something to return late; it is asserted.
+     */
+    void Free() override
+    {
+        assert(owned_bytes_ == 0 && phase_ != ReservePhase::kRequestOwned);
+        CcRequestBase::Free();
     }
 
     const void *Key() const
@@ -488,12 +690,27 @@ public:
         block_by_lock_ = val;
     }
 
-    bool AbortIfOom() const override
+    /** @return TxMemoryWaitPolicy() of the transaction's abort_if_oom_. */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return abort_if_oom_;
+        return TxMemoryWaitPolicy(abort_if_oom_);
     }
 
 private:
+    /**
+     * @brief Starts a fresh attempt's reservation state. A charge left from
+     * the previous attempt is a missing terminal cleanup and is asserted.
+     * @param reserve_bytes The new attempt's payload estimate.
+     */
+    void ResetReservation(size_t reserve_bytes)
+    {
+        assert(owned_bytes_ == 0 && phase_ != ReservePhase::kRequestOwned);
+        requested_bytes_ = reserve_bytes;
+        owned_bytes_ = 0;
+        charged_heap_ = nullptr;
+        phase_ = ReservePhase::kUncharged;
+    }
+
     const void *key_ptr_;
     const std::string *key_str_;
     uint32_t key_shard_code_;
@@ -512,6 +729,14 @@ private:
     bool is_local_{true};
     bool block_by_lock_{false};
     bool abort_if_oom_{false};
+    /** Payload estimate of this attempt, fixed at Reset(). */
+    size_t requested_bytes_{0};
+    /** Bytes charged to charged_heap_ and still owned by the request. */
+    size_t owned_bytes_{0};
+    /** The heap owned_bytes_ were charged to; null when nothing is owned. */
+    CcShardHeap *charged_heap_{nullptr};
+    /** Who owns the charge; see ReservePhase. */
+    ReservePhase phase_{ReservePhase::kUncharged};
 };
 
 struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>
@@ -645,9 +870,10 @@ public:
         res_->Value().last_vali_ts_ = std::max(res_->Value().last_vali_ts_, ts);
     }
 
-    bool AbortIfOom() const override
+    /** @return TxMemoryWaitPolicy() of the transaction's abort_if_oom_. */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return abort_if_oom_;
+        return TxMemoryWaitPolicy(abort_if_oom_);
     }
 
 protected:
@@ -1105,9 +1331,10 @@ public:
         ccm_ = nullptr;
     }
 
-    bool AbortIfOom() const override
+    /** @return TxMemoryWaitPolicy() of the transaction's abort_if_oom_. */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return abort_if_oom_;
+        return TxMemoryWaitPolicy(abort_if_oom_);
     }
 
 private:
@@ -1607,9 +1834,10 @@ public:
         cache_hit_miss_collected_ = true;
     }
 
-    bool AbortIfOom() const override
+    /** @return TxMemoryWaitPolicy() of the transaction's abort_if_oom_. */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return abort_if_oom_;
+        return TxMemoryWaitPolicy(abort_if_oom_);
     }
 
 private:
@@ -2898,9 +3126,20 @@ public:
         wait_for_snapshot_cnt_++;
     }
 
-    bool AbortIfOom() const override
+    /**
+     * @brief A slice scan always fails fast.
+     *
+     * The scan takes a read lock on each range before scanning its first
+     * slice and keeps it while it scans the rest (TransactionExecution's
+     * ScanNextOperation handling), so it always holds one. The request never
+     * parks for memory itself; the policy applies when a slice load it waits
+     * on runs out of memory, and the scan then fails instead of retrying the
+     * load while it still holds the range read lock.
+     * @return MemoryWait::kFailFast.
+     */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return true;
+        return MemoryWait::kFailFast;
     }
 
 private:
@@ -4884,6 +5123,23 @@ public:
     void SetFinish();
 
     void AbortCcRequest(CcErrorCode err_code) override;
+
+    /**
+     * @brief A log replay request is never rejected for staying parked for
+     * memory.
+     *
+     * Rejecting one marks the replay errored, which closes the node group's
+     * replay streams for the term, and the log groups that had not finished
+     * replay again: the same records are applied again under the same memory
+     * pressure. Recovery's own checkpoints flush what the replay installs.
+     * A released replay request checks its node group term first (Execute())
+     * and finishes without applying anything if the term changed.
+     * @return MemoryWait::kUnbounded.
+     */
+    MemoryWait MemoryWaitPolicy() const override
+    {
+        return MemoryWait::kUnbounded;
+    }
 
     const std::string_view LogContentView() const
     {
@@ -7040,9 +7296,10 @@ public:
         return schema_version_;
     }
 
-    bool AbortIfOom() const override
+    /** @return TxMemoryWaitPolicy() of the transaction's abort_if_oom_. */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return abort_if_oom_;
+        return TxMemoryWaitPolicy(abort_if_oom_);
     }
 
     union
@@ -7263,6 +7520,22 @@ public:
         size_t shard_idx =
             forward_msg_grp_ % Sharder::Instance().GetLocalCcShardsCount();
         Sharder::Instance().GetCcShard(shard_idx)->Enqueue(this);
+    }
+
+    /**
+     * @brief A forwarded write waits for shard memory without bound.
+     *
+     * A standby cannot drop a write its primary forwarded, so this request
+     * cannot be rejected: AbortCcRequest() does not end it, it puts it back
+     * on its shard's queue. With a bounded wait, the shard cleaner would
+     * reject it at the end of every pass once it had waited out the
+     * checkpoint-cycle bound, and each time it would run again, park again
+     * and wake the cleaner again, with no pause between rounds.
+     * @return MemoryWait::kUnbounded.
+     */
+    MemoryWait MemoryWaitPolicy() const override
+    {
+        return MemoryWait::kUnbounded;
     }
 
     bool Execute(CcShard &ccs) override
@@ -7620,7 +7893,8 @@ struct RequestAborterCc : public CcRequestBase
     {
         for (CcRequestBase *req : reqs_)
         {
-            if (err_code_ == CcErrorCode::OUT_OF_MEMORY && !req->AbortIfOom())
+            if (err_code_ == CcErrorCode::OUT_OF_MEMORY &&
+                req->MemoryWaitPolicy() != MemoryWait::kFailFast)
             {
                 // Re-enqueue this request to the shard.
                 ccs.Enqueue(ccs.LocalCoreId(), req);
@@ -7955,9 +8229,18 @@ public:
         return data_type_;
     }
 
-    bool AbortIfOom() const override
+    /**
+     * @brief An upload batch always fails fast.
+     *
+     * Both senders can do without it. The index build's key generator
+     * retries a batch that failed with OUT_OF_MEMORY (UploadIndexContext),
+     * and the records a data sync operation sends to a bucket's new owner
+     * during migration are a best-effort copy of its cache.
+     * @return MemoryWait::kFailFast.
+     */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return true;
+        return MemoryWait::kFailFast;
     }
 
 private:
@@ -8474,9 +8757,17 @@ public:
         return slice_data_;
     }
 
-    bool AbortIfOom() const override
+    /**
+     * @brief A slice upload always fails fast.
+     *
+     * It sends a range's cached slices to the range's future owner during a
+     * range split, which only saves that owner loading them from the data
+     * store; waiting for memory could block the split.
+     * @return MemoryWait::kFailFast.
+     */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return true;
+        return MemoryWait::kFailFast;
     }
 
 private:

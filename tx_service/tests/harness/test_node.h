@@ -52,6 +52,13 @@ struct TestNodeOptions
     bool skip_wal{true};
     CcProtocol protocol{CcProtocol::OccRead};
     IsolationLevel isolation{IsolationLevel::Snapshot};
+    /**
+     * Hand the in-process data store client to the engine as its store
+     * handler. The checkpointer thread runs only with a store handler, so this
+     * is what a test needs to exercise live checkpoint rounds; the data path
+     * still keeps full entries in the cc maps (skip_kv stays on).
+     */
+    bool store_backed{false};
 
     TestNodeOptions &CoreNum(uint32_t n)
     {
@@ -76,6 +83,11 @@ struct TestNodeOptions
     TestNodeOptions &Isolation(IsolationLevel iso)
     {
         isolation = iso;
+        return *this;
+    }
+    TestNodeOptions &StoreBacked(bool b)
+    {
+        store_backed = b;
         return *this;
     }
 };

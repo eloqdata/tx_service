@@ -1530,7 +1530,31 @@ public:
 
     void SetTxIdent(uint32_t latest_committed_txn_no);
 
-    // Return last succ ckpt timestamp on table.
+    /**
+     * @brief Creates and enqueues the data sync tasks of one table in one node
+     * group, as tasks of the data sync operation @p status.
+     *
+     * With @p hres, this call is the data sync operation's coordinator: the
+     * table is the data sync operation's only one, and the call signals that
+     * all tasks are enqueued (DataSyncStatus::EndEnqueuingLocked()). Without
+     * it, the caller is the coordinator: it may enqueue more tables, and
+     * signals it itself.
+     *
+     * @param table_name The table.
+     * @param ng_id The node group whose partitions of the table are flushed.
+     * @param ng_term The node group term the tasks run under.
+     * @param data_sync_ts The timestamp the tasks flush up to.
+     * @param[out] last_data_sync_ts The lowest last data sync timestamp of the
+     * table's partitions in the node group; UINT64_MAX if it has none.
+     * @param is_standby_node Whether this node flushes as a standby.
+     * @param is_dirty Whether the table is dirty, such as an index table still
+     * being created.
+     * @param can_be_skipped Whether the tasks belong to a periodic checkpoint
+     * cycle, and so merge into a partition's waiting checkpoint flush task.
+     * @param status The data sync operation the tasks belong to.
+     * @param hres The result handle the data sync operation's requester waits
+     * on, or nullptr.
+     */
     void EnqueueDataSyncTaskForTable(
         const TableName &table_name,
         uint32_t ng_id,
@@ -1870,6 +1894,13 @@ public:
         const TxKey &start_key,
         CcRequestBase *cc_request,
         CcShard *cc_shard);
+
+    /**
+     * The schema version InitPrebuiltTables() installs every prebuilt table
+     * with. A request against a prebuilt table must carry it, or the cc map
+     * rejects the request as a schema mismatch.
+     */
+    static constexpr uint64_t kPrebuiltTableSchemaVersion = 2;
 
     void InitPrebuiltTables(NodeGroupId ng_id, int64_t term);
 
@@ -2476,16 +2507,64 @@ private:
         uint64_t flush_data_mem_quota_{0};
     };
 
+    /**
+     * @brief Runs the data sync tasks of one partition (a range, or one core's
+     * share of a hash-partitioned table) one at a time.
+     *
+     * A task enqueued while the partition has no limiter creates one and goes
+     * to a worker queue; a task enqueued while it has one waits in
+     * pending_tasks_. When a task finishes, PopPendingTask() moves the front
+     * of pending_tasks_ to a worker queue, or erases the limiter if
+     * pending_tasks_ is empty.
+     *
+     * A checkpoint flush task is a data sync task created by a periodic
+     * checkpoint round (can_be_skipped; not the last checkpoint before
+     * shutdown). A partition has at most one that has not started, and later
+     * checkpoint rounds merge into it instead of enqueueing their own (see
+     * ckpt_flush_task_).
+     *
+     * Data sync tasks not initiated by a periodic checkpoint round never merge
+     * with checkpoint flush tasks, in either direction, nor with each other:
+     * each is enqueued as a task of its own and runs separately. Their sources
+     * are the last checkpoint before shutdown, a snapshot sent to a standby,
+     * an explicit flush request, index creation, bucket migration and range
+     * split. Each does work a checkpoint flush does not (a dirty schema, a key
+     * filter, new key ranges) or has a caller waiting for its own result.
+     */
     struct DataSyncTaskLimiter
     {
-        // `0` means no pending task
-        uint64_t latest_pending_task_ts_{0};
+        /**
+         * The timestamp ckpt_flush_task_ will flush up to: the highest of the
+         * checkpoint rounds merged into it. 0 while ckpt_flush_task_ is null.
+         */
+        uint64_t latest_ckpt_flush_ts_{0};
+        /**
+         * The partition's checkpoint flush task that has not started yet, or
+         * null. Set when a checkpoint round enqueues a task while this is null;
+         * cleared when that task starts (TakeLatestCkptFlushTs()).
+         *
+         * While it is set, a new checkpoint round enqueues nothing for the
+         * partition: it raises latest_ckpt_flush_ts_ and attaches its status
+         * to this task (DataSyncTask::AbsorbStatus), so the round concludes
+         * when this task finishes or fails.
+         */
+        std::shared_ptr<DataSyncTask> ckpt_flush_task_;
+        /**
+         * Tasks waiting for the partition's current task to finish, in run
+         * order (range split tasks at the front).
+         */
         std::deque<std::shared_ptr<DataSyncTask>> pending_tasks_;
 
-        uint64_t UnsetLatestPendingTs()
+        /**
+         * @brief Called when ckpt_flush_task_ starts: hands it
+         * latest_ckpt_flush_ts_ and clears both fields.
+         * @return latest_ckpt_flush_ts_ before it was cleared.
+         */
+        uint64_t TakeLatestCkptFlushTs()
         {
-            uint64_t ts = latest_pending_task_ts_;
-            latest_pending_task_ts_ = 0;
+            uint64_t ts = latest_ckpt_flush_ts_;
+            latest_ckpt_flush_ts_ = 0;
+            ckpt_flush_task_ = nullptr;
             return ts;
         }
     };

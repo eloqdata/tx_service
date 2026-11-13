@@ -62,7 +62,8 @@ void txservice::LocalCcHandler::AcquireWrite(
     uint32_t hd_res_idx,
     CcProtocol proto,
     IsolationLevel iso_level,
-    bool abort_if_oom)
+    bool abort_if_oom,
+    size_t reserve_bytes)
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
@@ -92,7 +93,8 @@ void txservice::LocalCcHandler::AcquireWrite(
                    hd_res_idx,
                    proto,
                    iso_level,
-                   abort_if_oom);
+                   abort_if_oom,
+                   reserve_bytes);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
@@ -118,7 +120,8 @@ void txservice::LocalCcHandler::AcquireWrite(
                                 hd_res_idx,
                                 proto,
                                 iso_level,
-                                abort_if_oom);
+                                abort_if_oom,
+                                reserve_bytes);
     }
 }
 

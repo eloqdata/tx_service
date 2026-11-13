@@ -155,6 +155,35 @@ public:
         return ongoing_data_sync_cnt_.load(std::memory_order_relaxed) > 0;
     }
 
+    /**
+     * @brief Whether an accepted checkpoint request (Notify()) is waiting for
+     * the checkpointer thread to take it.
+     * @return true from the accepted request until the thread takes it.
+     */
+    bool CheckpointRequested() const
+    {
+        return request_ckpt_.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Number of checkpoint cycles this node has concluded (see
+     * CkptCycle).
+     *
+     * Shards stamp requests parked for memory with this count and reject them
+     * after FLAGS_shard_memory_wait_ckpt_cycles more cycles.
+     * @return The monotonically increasing count.
+     */
+    uint64_t ConcludedCkptCycles() const
+    {
+        return concluded_ckpt_cycles_.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Records that one checkpoint cycle has concluded: advances the
+     * count and the checkpoint_cycles_concluded_total metric.
+     */
+    void OnCkptCycleConcluded();
+
 private:
     enum struct Status
     {
@@ -193,6 +222,8 @@ private:
      */
     uint32_t ckpt_delay_time_;
     std::atomic<uint64_t> ongoing_data_sync_cnt_{0};
+    /** See ConcludedCkptCycles(). */
+    std::atomic<uint64_t> concluded_ckpt_cycles_{0};
     TxService *tx_service_;
     TxLog *log_agent_;
 

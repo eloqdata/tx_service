@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 
 #include "cc_protocol.h"
 #include "error_messages.h"
@@ -35,6 +36,57 @@
 namespace txservice
 {
 class CcShard;
+
+/**
+ * @brief How long a request parked for shard memory may wait before it is
+ * rejected with OUT_OF_MEMORY (CcRequestBase::MemoryWaitPolicy()).
+ *
+ * The shard cleaner applies it at the end of a pass
+ * (CcShard::AbortRequestsAfterMemoryFree()), and a store slice load that
+ * fails with OUT_OF_MEMORY applies it to the requests waiting on that slice
+ * (RequestAborterCc).
+ */
+enum class MemoryWait : uint8_t
+{
+    /**
+     * Gives up rather than waits: rejected at the end of the first cleaner
+     * pass that finds the heap full or frees nothing, and aborted when a slice
+     * load it waits on runs out of memory. The checkpoint-cycle bound applies
+     * too. For requests whose wait could block a range split.
+     */
+    kFailFast,
+    /**
+     * Rejected once it has stayed parked across
+     * FLAGS_shard_memory_wait_ckpt_cycles concluded checkpoint cycles;
+     * re-enqueued, not aborted, when a slice load it waits on runs out of
+     * memory. The default.
+     */
+    kBounded,
+    /**
+     * Never rejected for waiting, however many checkpoint cycles conclude;
+     * re-enqueued when a slice load it waits on runs out of memory. For the
+     * requests that must be applied: log replay (ReplayLogCc) and a write
+     * forwarded to a standby (KeyObjectStandbyForwardCc).
+     */
+    kUnbounded,
+};
+
+/**
+ * @brief The memory wait policy of a request issued on behalf of a
+ * transaction, from the transaction's fail-fast flag.
+ *
+ * A transaction sets the flag (abort_if_oom) while it holds a range read
+ * lock: waiting for memory then could block a range split. The request types
+ * that carry the flag return this from CcRequestBase::MemoryWaitPolicy().
+ * @param abort_if_oom The transaction's fail-fast flag, as the request
+ * carries it.
+ * @return MemoryWait::kFailFast if @p abort_if_oom is set, else
+ * MemoryWait::kBounded.
+ */
+inline MemoryWait TxMemoryWaitPolicy(bool abort_if_oom)
+{
+    return abort_if_oom ? MemoryWait::kFailFast : MemoryWait::kBounded;
+}
 
 struct CcRequestBase
 {
@@ -61,9 +113,42 @@ public:
         in_use_.store(false, std::memory_order_release);
     }
 
+    /**
+     * @brief Takes the request into use for one attempt.
+     *
+     * Clears the memory park stamp: a pooled request reused for a new attempt
+     * must not inherit how long an earlier attempt waited.
+     */
     void Use()
     {
+        memory_park_stamp_ = 0;
         in_use_.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief The node's concluded checkpoint cycle count, plus one, at the
+     * time this request first parked for memory in the current attempt.
+     *
+     * Zero means the request has not parked since it was taken into use. The
+     * stamp survives release from the wait list and a later re-park, so the
+     * cleaner measures the wait from the first park (see
+     * CcShard::AbortRequestsAfterMemoryFree()).
+     * @return The stamp, or 0.
+     */
+    uint64_t MemoryParkStamp() const
+    {
+        return memory_park_stamp_;
+    }
+
+    /**
+     * @brief Records the first park of this attempt. Only the owning shard
+     * calls this, from CcShard::EnqueueWaitListIfMemoryFull().
+     * @param stamp The concluded cycle count plus one; never 0.
+     */
+    void SetMemoryParkStamp(uint64_t stamp)
+    {
+        assert(stamp != 0);
+        memory_park_stamp_ = stamp;
     }
 
     TxNumber Txn() const
@@ -94,9 +179,18 @@ public:
         return 0;
     }
 
-    virtual bool AbortIfOom() const
+    /**
+     * @brief How long this request may wait for shard memory before it is
+     * rejected with OUT_OF_MEMORY (see MemoryWait).
+     *
+     * A request that is not rejected is still released like any other, and
+     * whether it is still wanted is its own check when it executes again: its
+     * node group term may have changed while it was parked.
+     * @return MemoryWait::kBounded unless the request type says otherwise.
+     */
+    virtual MemoryWait MemoryWaitPolicy() const
     {
-        return false;
+        return MemoryWait::kBounded;
     }
 
 protected:
@@ -106,6 +200,8 @@ protected:
     TxNumber tx_number_{0};
     CcProtocol proto_{CcProtocol::OCC};
     IsolationLevel isolation_level_{IsolationLevel::ReadCommitted};
+    /** See MemoryParkStamp(). Written only by the owning shard. */
+    uint64_t memory_park_stamp_{0};
 
 private:
     // Intrusive links, managed exclusively by CcRequestList. They let a shard

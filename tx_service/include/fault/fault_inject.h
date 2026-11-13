@@ -197,6 +197,19 @@ public:
     void InjectFault(std::string fault_name, std::string paras);
 
     /**
+     * @brief Blocks the calling thread while the named fault stays armed.
+     *
+     * For fault points that hold a background thread at a chosen place until
+     * a test disarms the fault ("remove"). Logs "<fault name>: holding
+     * <what>" when the hold begins and "<fault name>: released <what>" when
+     * it ends, so that a test can wait for either line in the node's log.
+     *
+     * @param fault_name The fault whose arming keeps the hold.
+     * @param what What is being held, for the log lines.
+     */
+    void HoldWhileArmed(const std::string &fault_name, const std::string &what);
+
+    /**
      * @brief Whether this build compiles the fault points in.
      *
      * The fault points (ACTION_FAULT_INJECTOR, CODE_FAULT_INJECTOR) expand to

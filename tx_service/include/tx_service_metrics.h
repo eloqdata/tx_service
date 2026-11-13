@@ -72,6 +72,15 @@ inline const metrics::Name NAME_CHECKPOINT_ADVANCE_INTERVAL_SECONDS{
     "checkpoint_advance_interval_seconds"};
 inline const metrics::Name NAME_CHECKPOINT_FAILURES_TOTAL{
     "checkpoint_failures_total"};
+/**
+ * Concluded checkpoint cycles of this node (CkptCycle,
+ * Checkpointer::ConcludedCkptCycles()): one per round whose every part, the
+ * run's and each led node group's, has concluded. The count that ages requests
+ * parked for memory; a round deduplicated into an earlier round's pending
+ * flush adds to it when that flush lands.
+ */
+inline const metrics::Name NAME_CHECKPOINT_CYCLES_CONCLUDED_TOTAL{
+    "checkpoint_cycles_concluded_total"};
 
 // Checkpoint intervals are seconds-to-minutes operational signals. These
 // buckets retain useful resolution at the low end without losing visibility

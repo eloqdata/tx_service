@@ -46,8 +46,13 @@ three stable patterns:
 - a cache or metadata miss starts an asynchronous store read and transfers the
   requester to the fetch operation until backfill completes;
 - memory pressure transfers the request to a shard wait list while eviction or
-  checkpoint progress makes admission possible, unless the caller requested an
-  immediate out-of-memory failure.
+  checkpoint progress makes admission possible. Each request type says how
+  long it may wait (`MemoryWaitPolicy()`): a fail-fast request, such as one
+  of a transaction holding a range read lock, is rejected with an
+  out-of-memory failure at the first pass that finds the heap full or frees
+  nothing; any request but log replay and a write forwarded to a standby is
+  rejected once it has stayed parked across a configured number of concluded
+  checkpoint cycles.
 
 In all cases, waiting occurs outside `Execute()`. A resumed request continues
 with the lock, fetch result, or admission opportunity granted by the component
@@ -140,33 +145,116 @@ handler, while WAL replay reconstructs it during recovery. Those durability
 boundaries are described in
 [07-durability-and-recovery.md](07-durability-and-recovery.md).
 
+Shard memory has one ledger beside the allocator's figures: bytes reserved for
+payloads that commit-time write-lock acquisitions will install later. A record
+acquisition (`AcquireCc`) carries the coordinator's estimate of the value it
+will install in post-processing (the record's `MemUsage()`, zero for a delete)
+and charges it to the destination shard's heap before it attempts the write
+lock, after it has located or created the entry. Reserved bytes count as
+allocated in every admission decision, the heap's fullness check and the
+cleaner's targets included, so a reservation and an allocation are refused by
+the same test. The charge has exactly one owner at a time: the pending request
+while it waits in a lock queue, then the granted write lock, to which it moves
+without touching the ledger. An acquisition that finds its own transaction's
+write lock on the entry takes no charge, since the lock already carries one. A
+terminal failure of the request, wherever it is published, returns the charge;
+releasing or resetting the write lock returns the lock's. A charge that does
+not fit parks the request like any other memory shortage, without publishing
+the entry pointer; one larger than the whole shard limit fails at once.
+
+Entry admission and payload admission are separate checks. Entry lookup
+(`FindEmplace()`) returns an entry already resident whatever the heap's state,
+since finding it allocates nothing, and refuses only a miss on a full heap. An
+acquisition then admits its payload by the reservation, so a write to a
+resident key proceeds to its reservation on a full heap. A write that carries
+no reservation (an object command, log replay, a batch upload, a standby
+forward) asks the heap's fullness check itself before it installs into its
+entry, resident or just created (`UnreservedWriteMustWait()`), and on a full
+heap waits or fails as it would for a miss. Orphan lock recovery, which replays a committed
+transaction's log to install its value and release a write lock its
+coordinator left behind, is the exception: it only looks the key up, and once
+it finds the transaction still holding the lock it installs the value on a
+full heap without waiting, because the orphaned lock holds back the checkpoint
+that would free memory. The meta tables and the sequence table, which entry
+admission exempts from the limit because range split and the checkpointer
+depend on them, are exempt from both payload checks as well; their
+acquisitions reserve nothing.
+
+A value loaded from the store is admitted where it is installed. A point read
+that finds its key's value, or the historical version a snapshot needs, missing
+from memory issues a store fetch and waits on it; when the store answers, the
+fetch checks whether the heap is full before it installs anything, as entry
+admission does; the size of what it fetched is not weighed. At that point the
+waiting reads hold no lock on the key and the record is still in the store, so
+the fetch can wait or be dropped safely: on a full heap it parks like any other
+request, and waits no longer than the least patient read waiting on it. A
+rejection applies to each waiting read by its own policy: a fail-fast read
+fails with an out-of-memory error at once, a bounded read once the fetch has
+waited out the checkpoint-cycle bound. The fetch keeps its record for whoever
+is left, so a read that may still wait does not cause a second store read, and
+log replay, standby forwarding and command upload, which buffer their commands
+on the entry and wait on nothing, never lose a fetch to a read that shared it;
+the record is dropped only when no one is left. A fetch that installs no value
+(a missing or deleted key), a fetch that only such issuers share, and fetches
+on the exempt tables do not wait. A slice loaded for a scan
+is admitted the same way, batch by batch, and always fails fast because a slice
+being loaded blocks a range split. A transactional write is the one install
+that cannot be admitted where it happens: by then the transaction has
+committed and holds the write lock that keeps the checkpoint from advancing, so
+its admission is the reservation taken before the lock.
+
 A request that finds the shard heap at its limit parks on the shard's wait
 list; the park is counted, and the shard's single cleaner is scheduled if it
 is idle. A cleaner that is already sweeping or deferred is left alone. A pass
-starts at the LRU head and evicts in bounded batches while allocated memory is
-above the eviction target (5% of the limit free). It releases parked requests
-in batches of 20 whenever the heap is below the hard limit. Once a request has
-found the heap at its limit since the pass started or last released, which the
-park count reveals whoever parked, the room handed out is used up: the next
-release waits until the pass has reclaimed `shard_clean_release_kb` more (a tx
-service gflag, default 256 KB, zero meaning any amount, also a `[local]` key of
-the data substrate config), so the waiters follow the pace of eviction rather
-than a share of the
-heap. At the tail no further batch can add to that, so whatever the pass
-reclaimed since its last release goes out before the pass ends; an execution
-that starts at the tail reclaims nothing and releases nothing more, so the pass
-ends. A
-pass that reaches the tail with requests still parked aborts only requests
-that explicitly allow OOM failure, and only when the heap is full or the pass
-freed nothing; asks for a checkpoint when it reclaimed less than
-`shard_clean_release_kb`, since eviction is then not keeping up and a flush is
-what frees the dirty pages left; and defers. The timer thread retries a
-deferred cleaner after 100 ms, doubling the delay up to 1.6 s while passes stay
-under that bar; the backoff clears when a pass ends with nothing parked, so
-the next episode of pressure starts from 100 ms again. A checkpoint flush or a
-committed
-range split runs a deferred cleaner at once and marks a running pass to run
-once more; nothing rewinds a pass in progress.
+starts at the LRU head and evicts in bounded batches (10 pages or 30 us, so the
+shard's thread is not held up) while allocated memory is above the eviction
+target (5% of the limit free), or while a request has parked since the pass
+started or last released, since that request's memory did not fit however much
+room the target leaves. After each batch it releases parked requests, 20 at a
+time, while the heap is below the hard limit. A request that has parked since
+the pass started or last released, whichever request it was, found the heap at
+its limit, so the room the last release handed out is used up, and releasing
+again at once would only hand the waiters the same full heap; the park count
+shows whether any request has parked since then. In that case the pass keeps
+evicting and releases again only once it has reclaimed `shard_clean_release_kb`
+since the last release (a tx service gflag, default 256 KB, zero meaning any
+amount, also a `[local]` key of the data substrate config), so the waiters
+follow the pace of eviction. At the tail eviction can reclaim no more, so any
+amount reclaimed since the last release is enough; with none, nothing is
+released and the pass ends. A pass that reaches the tail with requests still
+parked aborts fail-fast requests when the heap is full or the pass freed
+nothing, and, whatever the heap's state, any request parked across
+`shard_memory_wait_ckpt_cycles` (default 5) concluded checkpoint
+cycles, unless it is a log replay request or a write forwarded to a standby,
+which must be applied and so wait without bound. A request is stamped with the
+node's concluded-cycle count when it first parks in an attempt, and the stamp
+survives release and re-park, so a request that cannot fit below the limit
+still ages; taking a pooled request into use again clears it. A cycle is one
+checkpointer run over every node group the node hosts, concluded when each
+group has flushed and advanced its timestamp, found
+nothing to flush, been skipped because a write lock pins its timestamp, or
+failed; a flush still running keeps the cycle open ([07](07-durability-and-recovery.md)).
+Counting cycles rather than time gives a flush that many chances, on the shard
+heap every hosted group shares, before a request is given up on, and it is the
+only exit for a transaction that is parked while holding the lock or the
+reservation another parked transaction needs.
+
+A pass that ends asks for a checkpoint when it reached the tail with requests
+still parked, however much it reclaimed, since eviction could not make the room
+they need, or when it reclaimed less than `shard_clean_release_kb` over the
+whole pass (not since the last release), since the sweep then found almost
+nothing evictable and only a flush turns the dirty entries left into evictable
+ones. It does not ask while the shard's heap is being defragmented or a data
+sync operation is running on the node, nor when a flush or a range split
+completed on the shard during the pass: the pass then runs once more at once,
+to reach entries that became evictable behind its cursor, and that pass
+decides. A pass that still has requests parked defers; the timer thread
+retries it after 100 ms, doubling the delay up to 1.6 s while passes reclaim
+less than `shard_clean_release_kb`, since sweeping such a chain again soon
+finds no more. The backoff clears when a pass ends with nothing parked, so the
+next episode of pressure starts from 100 ms again. A flush or a committed range
+split runs a deferred cleaner at once and marks a running pass to run once
+more; nothing rewinds a pass in progress.
 
 ## Deadlock and orphan-lock coordination
 
@@ -214,6 +302,15 @@ directly.
 - While a transaction holds a write lock on a data table or catalog entry, the
   checkpoint stays below its latest write-lock grant.
 - Eviction cannot remove dirty or transactionally owned entries.
+- Reserved payload bytes count as allocated in every admission decision, and
+  each charge has exactly one owner, the pending acquire request or the
+  granted write lock, until a terminal failure or a lock release returns it.
+- A request parked for memory is not left waiting indefinitely: it is
+  rejected once the configured number of checkpoint cycles have concluded
+  around it. The exception is log replay: rejecting a replay request makes
+  the log groups that had not finished replay again, and recovery's own
+  checkpoints flush what the replay installs. A released replay request
+  checks its node group term before applying anything.
 
 ## Source map
 
@@ -229,6 +326,10 @@ directly.
 | Typed maps own pages, entries, versions, and object-command specializations | `tx_service/include/cc/cc_entry.h`; `tx_service/include/cc/template_cc_map.h`; `tx_service/include/cc/object_cc_map.h` |
 | Scanners retain CC ownership across batched progress | `tx_service/include/cc/ccm_scanner.h`; `tx_service/include/cc/cc_request.h`; `tx_service/src/tx_execution.cpp` |
 | Shard-local eviction admits only unowned persistent entries | `tx_service/include/cc/cc_entry.h`; `tx_service/include/cc/cc_page_clean_guard.h`; `tx_service/src/cc/cc_shard.cpp` |
+| Payload reservations are charged before the write-lock attempt, owned by the request then the lock, and counted as allocated | `tx_service/include/cc/cc_shard.h` (`CcShardHeap`); `tx_service/include/cc/cc_request.h` (`AcquireCc`); `tx_service/include/cc/template_cc_map.h` (`FindEmplace`, `Execute(AcquireCc&)`); `tx_service/include/cc/non_blocking_lock.h`; `tx_service/src/cc/cc_entry.cpp`; `tx_service/tests/PayloadReservation-Test.cpp` |
+| A store fetch checks shard memory after the store answers and before it installs its record | `tx_service/include/cc/cc_req_misc.h` (`FetchRecordCc`); `tx_service/src/cc/cc_req_misc.cpp` (`FetchRecordCc::Execute`, `MustWaitForMemory`, `MemoryWaitPolicy`, `AbortCcRequest`); `tx_service/tests/PayloadReservation-Test.cpp` |
+| Parked requests are rejected after the configured number of concluded checkpoint cycles | `tx_service/include/cc/cc_req_base.h`; `tx_service/src/cc/cc_shard.cpp` (`EnqueueWaitListIfMemoryFull`, `AbortRequestsAfterMemoryFree`); `tx_service/src/cc/cc_req_misc.cpp` (`ShardCleanCc::Execute`); `tx_service/tests/PayloadReservation-Test.cpp` |
+| Each request type says how long it may wait for memory: fail fast, bounded by checkpoint cycles, or unbounded for log replay | `tx_service/include/cc/cc_req_base.h` (`MemoryWait`, `MemoryWaitPolicy`); `tx_service/include/cc/cc_request.h` (`AcquireCc`, `ReadCc` and the other transactional requests, `ScanSliceCc`, `UploadBatchCc`, `UploadBatchSlicesCc`, `ReplayLogCc`, `RequestAborterCc`); `tx_service/include/cc/cc_req_misc.h` (`FillStoreSliceCc`); `tx_service/src/cc/cc_shard.cpp` (`AbortRequestsAfterMemoryFree`); `tx_service/src/fault/log_replay_service.cpp` (a replay error closes the node group's replay streams and the watchdog asks again) |
 | The lock registry records each transaction's latest write-lock grant and whether it bounds the checkpoint | `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp`; `tx_service/src/cc/cc_map.cpp`; `tx_service/tests/CkptLockRegistry-Test.cpp` |
 | Lock grants report timestamp bounds, and catalog readers publish their commit timestamps | `tx_service/include/cc/template_cc_map.h`; `tx_service/src/cc/local_cc_handler.cpp`; `tx_service/src/tx_upsert_table_operation.cpp` |
 | Snapshot transactions start at the later of the timestamp base and the wall clock | `tx_service/src/cc/cc_shard.cpp`; `tx_service/src/cc/local_cc_handler.cpp` |

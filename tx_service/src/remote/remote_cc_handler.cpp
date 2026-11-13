@@ -50,7 +50,8 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     uint32_t hd_res_idx,
     CcProtocol proto,
     IsolationLevel iso_level,
-    bool abort_if_oom)
+    bool abort_if_oom,
+    size_t reserve_bytes)
 {
     /*message AcquireRequest
     {
@@ -90,6 +91,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
     acq->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
     acq->set_abort_if_oom(abort_if_oom);
+    acq->set_reserve_bytes(reserve_bytes);
 
     stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }

@@ -83,8 +83,13 @@ stage that is irrelevant or was already satisfied while executing a command:
 1. Read-lock the range or bucket metadata that determines placement of every
    write, so routing cannot change underneath commit.
 2. Acquire write ownership for buffered record keys at their local or remote CC
-   shards. Object commands retain the owner-shard write ownership established
-   during execution and acquire any additional forwarding ownership they need.
+   shards. Each acquisition carries the estimated size of the value it will
+   install, which the destination shard reserves before the lock attempt and
+   which every destination of a forwarded key reserves in full
+   ([03](03-concurrency-control.md)); a delete reserves nothing. Object
+   commands retain the owner-shard write ownership established during
+   execution and acquire any additional forwarding ownership they need,
+   without a payload estimate.
 3. Choose a commit timestamp above the transaction's start/lower bound and the
    version, lock, and read-validation bounds returned by touched entries.
 4. Validate optimistic reads and release the data-read ownership that no
@@ -171,6 +176,8 @@ contract.
 | Remote delivery is fenced by transaction number, command id, and the forward latch | `tx_service/include/tx_execution.h`; `tx_service/src/remote/cc_stream_receiver.cpp` |
 | Read/write and object-command footprints drive commit and cleanup | `tx_service/include/read_write_set.h`; `tx_service/include/command_set.h`; `tx_service/include/read_write_entry.h` |
 | The commit pipeline acquires placement and write ownership, sets a timestamp, validates, logs, and post-processes | `tx_service/src/tx_execution.cpp`; `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp` |
+| Write acquisitions carry the payload estimate to local and remote shards | `tx_service/src/tx_execution.cpp` (`Process(AcquireWriteOperation&)`); `tx_service/include/cc/cc_handler.h`; `tx_service/src/cc/local_cc_handler.cpp`; `tx_service/src/remote/remote_cc_handler.cpp`; `tx_service/include/proto/cc_request.proto` (`AcquireRequest.reserve_bytes`) |
+| A blocked-request probe closes an acquire slot only on a terminal status | `tx_service/src/remote/cc_stream_receiver.cpp` (`ApplyAcquireBlockCheckStatus`); `tx_service/tests/PayloadReservation-Test.cpp` |
 | WAL failures distinguish abort from an indeterminate outcome | `tx_service/src/tx_execution.cpp` (`Process`/`PostProcess(WriteToLogOp&)`) |
 | Object-command recovery images outlive operation completion and are released at terminal reset | `tx_service/include/tx_operation_result.h`; `tx_service/include/tx_execution.h`; `tx_service/src/tx_execution.cpp` |
 | Schema operations retry store steps after their point of no return and re-choose their commit timestamp under the commit-stage lock | `tx_service/src/tx_upsert_table_operation.cpp`; `tx_service/src/tx_index_operation.cpp`; `tx_service/include/tx_operation.h` |

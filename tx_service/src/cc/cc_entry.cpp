@@ -186,8 +186,12 @@ void LruEntry::ClearLocks(CcShard &ccs,
         ccs.DeleteLockHoldingTx(txn, this, ng_id);
     }
 
-    // clean up blocked cc reqs
+    // clean up blocked cc reqs. Each queued acquire returns its own
+    // request-owned payload charge from its abort hook.
     key_lock->AbortAllQueuedRequests(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+    // The granted writer's charge is lock-owned; return it before the reset
+    // zeros the lock, which asserts that no charge is left behind.
+    key_lock->ReleaseReservedBytes(&ccs);
 
     int64_t buffered_cmd_cnt_decr =
         cc_lock_and_extra_->BufferedCommandList().Size();

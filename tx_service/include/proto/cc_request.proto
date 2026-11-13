@@ -823,6 +823,11 @@ message AcquireRequest {
     IsolationType iso_level = 11;
     uint64 schema_version = 12;
     bool abort_if_oom = 13;
+    // Estimated payload bytes the transaction will install on this key at
+    // commit. The destination shard reserves them before the lock attempt.
+    // Absent (zero) from coordinators that predate the field: the write is
+    // then admitted on entry memory alone, as before.
+    uint64 reserve_bytes = 14;
 }
 
 message AcquireResponse {
