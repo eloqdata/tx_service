@@ -207,12 +207,15 @@ public:
         });
         if (ng_term < 0)
         {
+            // A resumed waiter still owns its payload charge.
+            req.ReleaseRequestReservation();
             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
         if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
         {
+            req.ReleaseRequestReservation();
             hd_res->SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return true;
         }
@@ -221,7 +224,10 @@ public:
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
         if (req.CcePtr() != nullptr)
         {
-            // The request was blocked before and is now unblocked.
+            // The request was blocked before and is now unblocked. A lock
+            // waiter resumes with its charge still request-owned; a key-cache
+            // retry resumes after the charge moved to the lock.
+            assert(req.Phase() != AcquireCc::ReservePhase::kUncharged);
             cce_ptr = static_cast<
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 req.CcePtr());
@@ -325,11 +331,12 @@ public:
                         return true;
                     }
                 }
-
-                req.SetCcePtr(cce_ptr);
             }
             else
             {
+                // An existing entry is returned even on a full heap; only a
+                // new entry is refused there. The payload reservation charged
+                // below is this request's memory admission.
                 Iterator it = FindEmplace(*target_key);
                 cce_ptr = it->second;
                 ccp = it.GetPage();
@@ -343,8 +350,49 @@ public:
                 }
 
                 assert(cce_ptr != nullptr);
-                req.SetCcePtr(cce_ptr);
             }
+
+            // Charge the payload reservation before the lock attempt, so
+            // admission sees the memory this write will install in PostWrite.
+            // A write lock this transaction already holds (a re-sent
+            // acquisition after a leadership change) already carries its
+            // charge: take none, or the key would be counted twice. A write
+            // intent is not a write lock; the upgrade is charged.
+            NonBlockingLock *held_lock = cce_ptr->GetKeyLock();
+            if (held_lock != nullptr && held_lock->HasWriteLock() &&
+                held_lock->WriteLockTx() == req.Txn())
+            {
+                // A retried request whose transaction already holds this
+                // write lock reserves nothing: the lock kept the charge taken
+                // by the first attempt.
+                req.MarkReservationLockOwned();
+            }
+            else if (ExemptFromMemoryLimit())
+            {
+                // The same exemption FindEmplace() grants these tables on a
+                // full heap: range split allocates range ids through the
+                // sequence table and commits that transaction to free
+                // memory, so its write must not wait for the memory its own
+                // progress would reclaim.
+                req.ExemptReservation();
+            }
+            else if (!req.ChargeReservation(shard_->GetShardHeap()))
+            {
+                CcShardHeap *shard_heap = shard_->GetShardHeap();
+                if (shard_heap != nullptr &&
+                    req.RequestedBytes() > shard_heap->MemoryLimit())
+                {
+                    // Can never fit: fail before any lock or WAL work.
+                    hd_res->SetError(CcErrorCode::OUT_OF_MEMORY);
+                    return true;
+                }
+                // Park without publishing cce_ptr: nothing protects the entry
+                // while the request waits, so it is looked up again by key on
+                // the retry.
+                shard_->EnqueueWaitListIfMemoryFull(&req);
+                return false;
+            }
+            req.SetCcePtr(cce_ptr);
         }
 
         // Cce ptr either points to the cc entry whose gap will accommodate the
@@ -380,6 +428,9 @@ public:
             if (err_code == CcErrorCode::NO_ERROR)
             {
                 assert(acquired_lock == LockType::WriteLock);
+                // The charge changes owner before any post-grant work, so a
+                // key-cache retry re-enters with it already on the lock.
+                req.TransferReservationToLock(cc_entry.GetKeyLock());
                 // for mvcc
                 uint64_t lock_ts = std::max(req.Ts(), shard_->Now());
                 cc_entry.GetKeyLock()->SetWLockTs(lock_ts);
@@ -466,7 +517,10 @@ public:
             }
             else
             {
-                // lock confilct: back off and retry.
+                // lock confilct: back off and retry. The charge goes back
+                // before the error is published, whether this was the first
+                // attempt or a waiter whose resumed bookkeeping failed.
+                req.ReleaseRequestReservation();
                 req.Result()->SetError(err_code);
                 return true;
             }
@@ -6508,16 +6562,19 @@ public:
                 continue;
             }
 
-            Iterator it = FindEmplace(key);
+            // Orphan lock recovery only looks the key up: the lock it
+            // recovers sits on an existing entry, so it never needs a new
+            // one. Log replay finds or emplaces the entry.
+            Iterator it = req.IsLockRecovery() ? Find(key) : FindEmplace(key);
             CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
                 it->second;
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 it.GetPage();
 
-            // For orphan lock recovery, verify if the transaction still holds
-            // the lock on this CC entry.
             if (req.IsLockRecovery())
             {
+                // For orphan lock recovery, verify if the transaction still
+                // holds the lock on this CC entry.
                 if (const NonBlockingLock *key_lock =
                         cce != nullptr ? cce->GetKeyLock() : nullptr;
                     key_lock == nullptr ||
@@ -6529,13 +6586,21 @@ public:
                     }
                     continue;
                 }
+                // The transaction is committed and still holds the lock. Its
+                // record is installed and the lock released whatever the
+                // heap's state: the orphaned write lock keeps the checkpoint
+                // below its timestamp, so waiting for memory here could wait
+                // on the very flush this lock blocks. A write lock also
+                // carries the payload reservation its acquisition charged.
             }
-
-            if (cce == nullptr)
+            else if (cce == nullptr || UnreservedWriteMustWait())
             {
-                // Since we're not holding any range lock that would
-                // block data sync during replay, just keep retrying
-                // until we have free space in cc map.
+                // Either a new entry cannot be admitted, or the entry is
+                // there, found or just emplaced, and the heap is too full to
+                // install a record that has no reservation. Since we're not
+                // holding any range lock that would block data sync during
+                // replay, just keep retrying until we have free space in cc
+                // map.
                 shard_->EnqueueWaitListIfMemoryFull(&req);
                 return false;
             }
@@ -7371,15 +7436,21 @@ public:
             it = FindEmplace(*key);
             cce = it->second;
             cc_page = it.GetPage();
-            if (cce == nullptr)
+            if (cce == nullptr || UnreservedWriteMustWait())
             {
-                // This cc shard has reached max memory limit. We didn't write
-                // data log for this upload batch req, but we have acquired
-                // range read lock for this key. If we do not return error and
-                // release the range read lock, it might block range split from
-                // finishing. We should return error here so that coordinator
-                // can release range read lock and retry later.
-                // OOM will occurred when shard clean failed.
+                // A new entry cannot be admitted, or the entry is there,
+                // found or just emplaced, and the heap is too full to install
+                // a record that has no reservation.
+                //
+                // Park the request and wake the cleaner, but only for one
+                // cleaner pass. No data log was written for this upload batch
+                // request, and its coordinator holds the range read lock of
+                // this key, so a long wait here could block a range split
+                // from finishing. The request's memory wait policy is
+                // therefore fail-fast (UploadBatchCc::MemoryWaitPolicy()): if
+                // the pass ends with the heap still full, or frees nothing,
+                // the cleaner rejects the request with OUT_OF_MEMORY, and the
+                // coordinator releases the range read lock and retries later.
                 shard_->EnqueueWaitListIfMemoryFull(&req);
                 return false;
             }
@@ -9302,6 +9373,15 @@ protected:
         }
     }
 
+    /**
+     * @brief Finds or emplaces the entry of a key, for a caller that does not
+     * need to know whether the entry was emplaced.
+     * @param key The key.
+     * @param force_emplace Emplace a missing entry even on a full heap.
+     * @param read_only_req The request writes no value.
+     * @return The iterator of the entry, or End() when the key is absent and
+     * the heap is full. See the overload that reports the emplace.
+     */
     Iterator FindEmplace(const KeyT &key,
                          bool force_emplace = false,
                          bool read_only_req = false)
@@ -9557,38 +9637,9 @@ protected:
 
         // catalog and range ccmap bypass shard memory limit. since
         // checkpointer may emplace ccentry into ccmap.
-        CcShardHeap *shard_heap = shard_->GetShardHeap();
-        int64_t heap_alloc, heap_commit;
-        if (shard_->EnableDefragment() && shard_heap != nullptr &&
-            shard_heap->NeedDefragment(&heap_alloc, &heap_commit) &&
-            shard_heap->AsyncDefragment())
+        if (CheckShardHeapFull() && !force_emplace && !table_name_.IsMeta())
         {
-            LOG(INFO) << "Found memory fragementation in ccs "
-                      << shard_->core_id_
-                      << ", total comitted memory: " << heap_commit
-                      << ", actual used memory " << heap_alloc
-                      << ", frag ratio " << std::setprecision(2)
-                      << 100 * (static_cast<float>(heap_commit - heap_alloc) /
-                                heap_commit);
-        }
-
-        if (shard_heap != nullptr &&
-            shard_heap->Full(&heap_alloc, &heap_commit))
-        {
-            if (txservice_enable_cache_replacement &&
-                shard_heap->NeedCleanShard(heap_alloc, heap_commit))
-            {
-                // The shard has reached the maximal capacity. Tries to clean cc
-                // entries that have been checkpointed but are not being
-                // accessed by active tx's.
-                shard_->WakeUpShardCleanCc();
-            }
-            // else: cache replacement is disable or no need to clean shard.
-
-            if (!force_emplace && !table_name_.IsMeta())
-            {
-                return false;
-            }
+            return false;
         }
 
         int32_t normal_rec_change = 0;
@@ -9848,13 +9899,113 @@ protected:
     }
 
     /**
-     * Find or Emplace the CcEntry with key @param key.
+     * @brief Whether this table is exempt from the shard memory limit: a meta
+     * table or the sequence table.
      *
-     * @param key
-     * @param read_only_req For read only request we will try to find
-     * the cce regardless of shard memory. If we can't find it and shard
-     * is full, we will return End.
-     * @return The Iterator pointing to the target CcEntry
+     * The checkpointer emplaces entries into the meta tables, and range split
+     * allocates range ids through the sequence table and commits that
+     * transaction to free memory, so a write to these tables must not wait
+     * for the memory its own progress would reclaim.
+     * @return true if the table is exempt.
+     */
+    bool ExemptFromMemoryLimit() const
+    {
+        return table_name_.IsMeta() || table_name_ == sequence_table_name;
+    }
+
+    /**
+     * @brief Checks whether the shard heap is full, on behalf of a request
+     * that is about to use more of it.
+     *
+     * Starts defragmentation if the heap is fragmented, and wakes the shard
+     * cleaner if the heap is full and cache replacement can free memory.
+     * @return true if the heap is full (CcShardHeap::Full(), which counts
+     * reserved bytes).
+     */
+    bool CheckShardHeapFull()
+    {
+        CcShardHeap *shard_heap = shard_->GetShardHeap();
+        if (shard_heap == nullptr)
+        {
+            return false;
+        }
+
+        int64_t heap_alloc = 0, heap_commit = 0;
+        const bool heap_full = shard_heap->Full(&heap_alloc, &heap_commit);
+        shard_heap->StartDefragmentIfNeeded(heap_alloc, heap_commit);
+
+        if (heap_full)
+        {
+            // Full() counts reserved bytes; the cleaner's own rule reads the
+            // same effective figure.
+            int64_t effective_alloc =
+                heap_alloc + static_cast<int64_t>(shard_heap->ReservedBytes());
+            if (txservice_enable_cache_replacement &&
+                shard_heap->NeedCleanShard(effective_alloc, heap_commit))
+            {
+                // The shard has reached the maximal capacity. Tries to clean cc
+                // entries that have been checkpointed but are not being
+                // accessed by active tx's.
+                shard_->WakeUpShardCleanCc();
+            }
+            // else: cache replacement is disable or no need to clean shard.
+        }
+        return heap_full;
+    }
+
+    /**
+     * @brief Whether a write that reserved no memory for its payload must
+     * wait for shard memory before it installs the payload into its entry.
+     *
+     * FindEmplace() returns an existing entry whatever the heap's state, so
+     * it does not stop such a write; without this check, writes to keys
+     * already in the map would grow the heap without limit. The callers are
+     * the requests that install a payload with no reservation behind it: log
+     * replay, batch upload, a write forwarded to a standby, and an ObjectCcMap
+     * write command. A write lock acquisition (AcquireCc) reserves its
+     * payload instead and does not call this. A caller whose FindEmplace()
+     * just emplaced the entry calls it too: the heap was checked before the
+     * new entry, and maybe a new page, were allocated, and may be full now.
+     *
+     * The check sees the heap only after it has filled, so such writes stop
+     * one payload late, but they do stop.
+     * @return true if the heap is full and the table is not exempt from the
+     * memory limit (ExemptFromMemoryLimit()). The caller then parks the
+     * request (CcShard::EnqueueWaitListIfMemoryFull()) or fails it.
+     */
+    bool UnreservedWriteMustWait()
+    {
+        return !ExemptFromMemoryLimit() && CheckShardHeapFull();
+    }
+
+    /**
+     * @brief Finds the entry of a key, emplacing a new entry if the key is
+     * absent.
+     *
+     * An existing entry is always returned, whatever the heap's state:
+     * finding it allocates nothing. The heap is checked only when the key is
+     * absent and a new entry needs memory, so End() means exactly one thing:
+     * the key is not in the map and a new entry cannot be admitted now. A
+     * caller that gets End() parks the request for memory or fails it.
+     *
+     * Whether the caller may then install a payload into the entry is not
+     * decided here. A write lock acquisition reserves its payload
+     * (AcquireCc::ChargeReservation()); a write with no reservation asks
+     * UnreservedWriteMustWait().
+     *
+     * @param key The key. Negative infinity returns Begin(), positive
+     * infinity End().
+     * @param[out] emplace Set to true if a new entry was emplaced.
+     * @param force_emplace Emplace a missing entry even on a full heap. The
+     * meta tables and the sequence table always do
+     * (ExemptFromMemoryLimit()).
+     * @param read_only_req The request writes no value: a read that does not
+     * intend to write, or in ObjectCcMap a read-only command or a delete. On
+     * a full heap it gets End() if the key is absent, whatever the table and
+     * @p force_emplace. With room in the heap it emplaces a missing entry
+     * like any other request: a read needs an entry to put its lock on.
+     * @return The iterator of the entry, or End() when the key is absent and
+     * the heap is full.
      */
     Iterator FindEmplace(const KeyT &key,
                          bool *emplace,
@@ -9862,7 +10013,6 @@ protected:
                          bool read_only_req = false)
     {
         *emplace = false;
-        bool fail_if_not_found = false;
         if (&key == KeyT::NegativeInfinity())
         {
             return Begin();
@@ -9872,54 +10022,45 @@ protected:
             return End();
         }
 
-        // catalog and range ccmap bypass shard memory limit. since
-        // checkpointer may emplace ccentry into ccmap.
-        CcShardHeap *shard_heap = shard_->GetShardHeap();
-        int64_t heap_alloc, heap_commit;
-        if (shard_->EnableDefragment() && shard_heap != nullptr &&
-            shard_heap->NeedDefragment(&heap_alloc, &heap_commit) &&
-            shard_heap->AsyncDefragment())
+        // First locate the target page and look the key up. A hit is
+        // returned before any capacity check.
+        auto target_it = ccmp_.end();
+        CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *target_page =
+            nullptr;
+        if (ccmp_.begin() != ccmp_.end())
         {
-            LOG(INFO) << "Found memory fragementation in ccs "
-                      << shard_->core_id_
-                      << ", total comitted memory: " << heap_commit
-                      << ", actual used memory " << heap_alloc
-                      << ", frag ratio " << std::setprecision(2)
-                      << 100 * (static_cast<float>(heap_commit - heap_alloc) /
-                                heap_commit);
+            auto ub_it = ccmp_.upper_bound(key);
+            assert(ub_it == ccmp_.end() || key < ub_it->first);
+            target_it = ub_it;
+            if (target_it != ccmp_.begin())
+            {
+                --target_it;
+                assert(target_it->first <= key);
+            }
+            target_page = target_it->second.get();
+
+            size_t idx_in_page = target_page->Find(key);
+            if (idx_in_page < target_page->Size())
+            {
+                // found, return Iterator
+                shard_->UpdateLruList(target_page, false);
+                Iterator iterator(target_page, idx_in_page, &neg_inf_);
+                return iterator;
+            }
         }
 
-        if (shard_heap != nullptr &&
-            shard_heap->Full(&heap_alloc, &heap_commit))
+        // The key is absent and a new entry needs memory. A read-only request
+        // is never given a new entry on a full heap. Any other request is
+        // refused unless it emplaces regardless: force_emplace, or a table
+        // exempt from the memory limit.
+        if (CheckShardHeapFull() &&
+            (read_only_req || (!force_emplace && !ExemptFromMemoryLimit())))
         {
-            if (txservice_enable_cache_replacement &&
-                shard_heap->NeedCleanShard(heap_alloc, heap_commit))
-            {
-                // The shard has reached the maximal capacity. Tries to clean cc
-                // entries that have been checkpointed but are not being
-                // accessed by active tx's.
-                shard_->WakeUpShardCleanCc();
-            }
-            // else: cache replacement is disable or no need to clean shard.
-
-            if (!force_emplace && !table_name_.IsMeta() &&
-                table_name_ != sequence_table_name && !read_only_req)
-            {
-                // Blocking sequence table update might cause range split fail
-                // to get new range ids, then causing checkpoint to be blocked
-                // and no dirty data can be flushed.
-                return End();
-            }
-
-            fail_if_not_found = read_only_req;
+            return End();
         }
 
-        if (ccmp_.begin() == ccmp_.end())
+        if (target_page == nullptr)
         {
-            if (fail_if_not_found)
-            {
-                return End();
-            }
             // ccmap is empty, insert a page
             auto [it, inserted] = ccmp_.try_emplace(
                 key,
@@ -9930,32 +10071,8 @@ protected:
             // This silences the -Wunused-but-set-variable warning
             // without any runtime overhead.
             (void) inserted;
-        }
-
-        // First locate target page, then find or emplace `key` in the
-        // page.
-        auto ub_it = ccmp_.upper_bound(key);
-        assert(ub_it == ccmp_.end() || key < ub_it->first);
-        auto target_it = ub_it;
-        if (target_it != ccmp_.begin())
-        {
-            --target_it;
-            assert(target_it->first <= key);
-        }
-        CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *target_page =
-            target_it->second.get();
-
-        size_t idx_in_page = target_page->Find(key);
-        if (idx_in_page < target_page->Size())
-        {
-            // found, return Iterator
-            shard_->UpdateLruList(target_page, false);
-            Iterator iterator(target_page, idx_in_page, &neg_inf_);
-            return iterator;
-        }
-        if (fail_if_not_found)
-        {
-            return End();
+            target_it = it;
+            target_page = it->second.get();
         }
 
         if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
@@ -10113,7 +10230,7 @@ protected:
             }
         }
 
-        idx_in_page = target_page->Emplace(key);
+        const size_t idx_in_page = target_page->Emplace(key);
         *emplace = true;
         // modify page key in the map if it changed
         TryUpdatePageKey(target_it);

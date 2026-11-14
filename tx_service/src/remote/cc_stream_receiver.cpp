@@ -110,6 +110,38 @@ thread_local CcRequestPool<KeyObjectStandbyForwardCc>
     key_obj_standby_forward_pool_;
 thread_local CcRequestPool<ParseCcMsgCc> parse_standby_forward_pool_;
 
+void ApplyAcquireBlockCheckStatus(AcquireKeyResult &slot,
+                                  CcHandlerResultBase &hd_res,
+                                  AckStatus status)
+{
+    // A probe targets only a request sent to another node (the probe sender
+    // messages the node holding the request only when it is remote), and a
+    // remote acquisition is counted as remote when it is sent
+    // (LocalCcHandler::AcquireWrite calls IncreaseRemoteRef()). A terminal
+    // status therefore finishes it with SetRemoteError(), which lowers the
+    // remote count together with the total, as the normal AcquireResponse
+    // does with SetRemoteError()/SetRemoteFinished().
+    switch (status)
+    {
+    case AckStatus::ErrorTerm:
+        slot.SetRemoteHdResult(true, std::memory_order_release);
+        hd_res.SetRemoteError(CcErrorCode::NG_TERM_CHANGED);
+        break;
+    case AckStatus::Finished:
+        // The cc request has been executed or aborted on the remote node,
+        // the result is unknown. Treat it as the response is lost otherwise
+        // txm might block forever if the response is really lost.
+        slot.SetRemoteHdResult(true, std::memory_order_release);
+        hd_res.SetRemoteError(CcErrorCode::REQUEST_LOST);
+        break;
+    case AckStatus::BlockQueue:
+    case AckStatus::Unknown:
+        // Still in the remote node's lock queue: the txm keeps waiting and
+        // the slot stays open for the real response and a later re-probe.
+        break;
+    }
+}
+
 CcStreamReceiver::CcStreamReceiver(LocalCcShards &local_shards,
                                    CcMessagePool &msg_pool)
     : local_shards_(local_shards), msg_pool_(msg_pool)
@@ -1670,27 +1702,15 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 break;
             }
 
-            acq_key_result_vec.at(resp.acq_key_result_vec_idx())
-                .SetRemoteHdResult(true, std::memory_order_release);
-
-            AckStatus status = (AckStatus) resp.req_status();
-            if (status == AckStatus::ErrorTerm)
-            {
-                hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);
-            }
-            else if (status == AckStatus::Finished)
-            {
-                // The cc request has been executed or aborted on the remote
-                // node, the result is unknown. Treat it as the response is
-                // lost otherwise txm might block forever if the response is
-                // really lost.
-                hd_res->SetError(CcErrorCode::REQUEST_LOST);
-            }
-            else if (status == AckStatus::BlockQueue)
-            {
-                // The cc request is still in blocking queue. The txm
-                // should keep waiting.
-            }
+            // The remote node answered the probe about a request it has not
+            // replied to. Only an answer that the request is gone (its node
+            // group's term changed, or it already finished) closes the slot
+            // with an error; a request still blocked in a lock queue leaves
+            // the slot open for the real reply and a later probe.
+            ApplyAcquireBlockCheckStatus(
+                acq_key_result_vec.at(resp.acq_key_result_vec_idx()),
+                *hd_res,
+                (AckStatus) resp.req_status());
             hd_res->UnsetBlockReqCheckTs();
 
             txm->ReleaseSharedForwardLatch();
@@ -1714,6 +1734,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             AckStatus status = (AckStatus) resp.req_status();
 
+            // Unlike acquisitions above, a remote read or acquire-all is not
+            // counted as remote when it is sent (LocalCcHandler::Read and
+            // AcquireWriteAll do not call IncreaseRemoteRef()), and its
+            // normal response finishes with SetError()/SetFinished(); a
+            // terminal probe status does the same.
             if (status == AckStatus::ErrorTerm)
             {
                 hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);

@@ -146,11 +146,21 @@ public:
         return remote_ref_cnt_.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Outstanding requests of this result that run on this node: the
+     * total minus the remote ones.
+     *
+     * @return The difference, or 0 when the remote count is not below the
+     * total. The counts are unsigned, so the comparison comes before the
+     * subtraction: a remote count left too high must read as no local
+     * requests, which lets a timed-out operation go on to probe its remote
+     * requests, not as a wrapped huge count that waits on deadlock checks.
+     */
     uint32_t LocalRefCnt()
     {
         uint32_t total = ref_cnt_.load(std::memory_order_relaxed);
         uint32_t remote = remote_ref_cnt_.load(std::memory_order_relaxed);
-        return total - remote > 0 ? total - remote : 0;
+        return total > remote ? total - remote : 0;
     }
 
     void Reset()

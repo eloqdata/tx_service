@@ -58,6 +58,17 @@
 #endif
 
 DECLARE_bool(cmd_read_catalog);
+DEFINE_uint64(shard_memory_wait_ckpt_cycles,
+              5,
+              "Concluded checkpoint cycles a request may stay parked for shard "
+              "memory before the cleaner rejects it with OUT_OF_MEMORY. A "
+              "cycle concludes when every node group on the node has flushed, "
+              "found nothing to flush, been skipped because a write lock pins "
+              "its checkpoint timestamp, or failed; a flush still running does "
+              "not count. Log replay requests are exempt. Zero disables the "
+              "rule and leaves only the fail-fast rejection of requests that "
+              "may not wait, such as those of a transaction holding a range "
+              "read lock.");
 
 namespace txservice
 {
@@ -567,6 +578,13 @@ void CcShard::Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req)
 
 void CcShard::EnqueueWaitListIfMemoryFull(CcRequestBase *req)
 {
+    if (req->MemoryParkStamp() == 0)
+    {
+        // First park of this attempt. The stamp is the concluded cycle count
+        // plus one so that zero keeps meaning "never parked"; the age of a
+        // parked request is the current count plus one, minus the stamp.
+        req->SetMemoryParkStamp(ConcludedCkptCycles() + 1);
+    }
     cc_wait_list_for_memory_.PushBack(req);
     // Counted even when cache replacement is off: the cleaner then evicts
     // nothing, but it still releases parked requests once the heap is below
@@ -598,16 +616,32 @@ bool CcShard::DequeueWaitListAfterMemoryFree(bool deque_all)
     return cc_wait_list_for_memory_.Empty();
 }
 
-void CcShard::AbortRequestsAfterMemoryFree()
+bool CcShard::MemoryWaitCyclesExhausted(uint64_t stamp) const
+{
+    // A stamp of s means the request first parked when the concluded cycle
+    // count was s - 1; it has waited (cycles + 1) - s cycles since.
+    const uint64_t max_wait_cycles = FLAGS_shard_memory_wait_ckpt_cycles;
+    return max_wait_cycles != 0 && stamp != 0 &&
+           ConcludedCkptCycles() + 1 - stamp >= max_wait_cycles;
+}
+
+void CcShard::AbortRequestsAfterMemoryFree(bool reject_fail_fast)
 {
     for (CcRequestBase *req = cc_wait_list_for_memory_.Front(); req != nullptr;)
     {
         CcRequestBase *next = CcRequestList::NextOf(req);
-        if (req->AbortIfOom())
+        const MemoryWait policy = req->MemoryWaitPolicy();
+        const bool waited_out =
+            policy != MemoryWait::kUnbounded &&
+            MemoryWaitCyclesExhausted(req->MemoryParkStamp());
+        if ((reject_fail_fast && policy == MemoryWait::kFailFast) || waited_out)
         {
             // Unlink before aborting: AbortCcRequest may Free() the request
             // back to its pool, where a producer can reuse and re-link it
-            // while stale links would still point into this list.
+            // while stale links would still point into this list. An abort
+            // hook may also park its request again, at the tail (a store
+            // fetch that still has requests waiting on it); this loop then
+            // reaches it once more and finds nothing left to reject.
             cc_wait_list_for_memory_.Remove(req);
             req->AbortCcRequest(CcErrorCode::OUT_OF_MEMORY);
         }
@@ -1886,6 +1920,16 @@ void CcShard::NotifyCkpt(bool request_ckpt, const char *reason)
     {
         ckpter_->Notify(request_ckpt, reason);
     }
+}
+
+bool CcShard::IsOngoingDataSync() const
+{
+    return ckpter_ != nullptr && ckpter_->IsOngoingDataSync();
+}
+
+uint64_t CcShard::ConcludedCkptCycles() const
+{
+    return ckpter_ != nullptr ? ckpter_->ConcludedCkptCycles() : 0;
 }
 
 void CcShard::DispatchTask(uint16_t cc_shard_idx,
@@ -3317,43 +3361,103 @@ uint32_t CcShardHeap::SetAsDefaultArena()
 #endif
 }
 
-bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
+void CcShardHeap::AllocatorStats(int64_t &alloc, int64_t &commit) const
 {
 #if defined(WITH_JEMALLOC)
     // estimate thread memory usage from total process memory
     size_t total_resident = 0;
     size_t total_allocated = 0;
     GetJemallocArenaStat(arena_id_, total_resident, total_allocated);
-
-    if (alloc != nullptr)
-    {
-        *alloc = total_allocated;
-    }
-
-    if (commit != nullptr)
-    {
-        *commit = total_resident;
-    }
-
-    return total_allocated >= memory_limit_;
-
+    alloc = static_cast<int64_t>(total_allocated);
+    commit = static_cast<int64_t>(total_resident);
 #else
-    int64_t allocated, committed;
-    mi_thread_stats(&allocated, &committed);
+    mi_thread_stats(&alloc, &commit);
+#endif
+}
+
+int64_t CcShardHeap::PhysicalAllocated() const
+{
+    int64_t allocated = 0, committed = 0;
+    AllocatorStats(allocated, committed);
+    return allocated;
+}
+
+bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
+{
+    int64_t allocated = 0, committed = 0;
+    AllocatorStats(allocated, committed);
     if (alloc != nullptr)
     {
         *alloc = allocated;
     }
-
     if (commit != nullptr)
     {
         *commit = committed;
     }
 
-    return allocated >= static_cast<int64_t>(memory_limit_) ||
-           (cc_shard_->EnableDefragment() &&
-            committed > static_cast<int64_t>(memory_limit_));
+    // Reserved bytes are promises to writers and count as used. Allocated
+    // bytes below zero are an allocator statistics failure, not an empty
+    // heap: the sum with the reservations is still compared as is, so a
+    // large reservation keeps the limit honest and a bogus negative figure
+    // never admits more than the reservations alone allow.
+    const int64_t used = allocated + static_cast<int64_t>(reserved_bytes_);
+    if (used >= static_cast<int64_t>(memory_limit_))
+    {
+        return true;
+    }
+#if !defined(WITH_JEMALLOC)
+    if (cc_shard_->EnableDefragment() &&
+        committed > static_cast<int64_t>(memory_limit_))
+    {
+        return true;
+    }
 #endif
+    return false;
+}
+
+bool CcShardHeap::TryReserve(size_t bytes)
+{
+    if (bytes == 0)
+    {
+        return true;
+    }
+    if (bytes > memory_limit_)
+    {
+        return false;
+    }
+
+    int64_t allocated = 0, committed = 0;
+    const bool full = Full(&allocated, &committed);
+    // A write to a key already in the cc map asks for memory only here: its
+    // entry is found without a capacity check, so it never reaches the
+    // defragmentation check of entry admission. Without the check here, a
+    // heap that is full only because committed memory is over the limit
+    // would park such writes with nothing to bring the committed memory
+    // down. The figures were just read for Full(), so the check reads
+    // nothing more.
+    StartDefragmentIfNeeded(allocated, committed);
+    if (full)
+    {
+        return false;
+    }
+    // Subtractive form: `used > limit - bytes` cannot overflow, and a
+    // negative allocated figure is clamped so it does not count as free
+    // room.
+    const uint64_t used =
+        static_cast<uint64_t>(std::max<int64_t>(0, allocated)) +
+        reserved_bytes_;
+    if (used > memory_limit_ - bytes)
+    {
+        return false;
+    }
+    reserved_bytes_ += bytes;
+    return true;
+}
+
+void CcShardHeap::ReleaseReservation(size_t bytes)
+{
+    assert(bytes <= reserved_bytes_);
+    reserved_bytes_ -= std::min(bytes, reserved_bytes_);
 }
 
 bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
@@ -3363,29 +3467,34 @@ bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
             alloc > (memory_limit_ * CcShardHeap::high_water));
 }
 
-bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
+bool CcShardHeap::IsFragmented(int64_t allocated, int64_t committed) const
 {
 #if defined(WITH_JEMALLOC)
     // defragmentation is not supported with jemalloc
+    (void) allocated;
+    (void) committed;
     return false;
 
 #else
-    int64_t allocated, committed;
-    mi_thread_stats(&allocated, &committed);
-    if (alloc != nullptr)
-    {
-        *alloc = allocated;
-    }
-
-    if (commit != nullptr)
-    {
-        *commit = committed;
-    }
-
     return committed > (memory_limit_ * CcShardHeap::high_water) &&
            (static_cast<double>(allocated) / static_cast<double>(committed)) <=
                CcShardHeap::utilization;
 #endif
+}
+
+bool CcShardHeap::StartDefragmentIfNeeded(int64_t allocated, int64_t committed)
+{
+    if (!cc_shard_->EnableDefragment() || !IsFragmented(allocated, committed) ||
+        !AsyncDefragment())
+    {
+        return false;
+    }
+    LOG(INFO) << "Found memory fragementation in ccs " << cc_shard_->core_id_
+              << ", total comitted memory: " << committed
+              << ", actual used memory " << allocated << ", frag ratio "
+              << std::setprecision(2)
+              << 100 * (static_cast<float>(committed - allocated) / committed);
+    return true;
 }
 
 bool CcShardHeap::AsyncDefragment()

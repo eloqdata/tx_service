@@ -98,6 +98,7 @@ public:
     using TemplateCcMap<KeyT, ValueT, false, false>::ccmp_;
     using TemplateCcMap<KeyT, ValueT, false, false>::Find;
     using TemplateCcMap<KeyT, ValueT, false, false>::FindEmplace;
+    using TemplateCcMap<KeyT, ValueT, false, false>::UnreservedWriteMustWait;
     using TemplateCcMap<KeyT, ValueT, false, false>::End;
     using typename TemplateCcMap<KeyT, ValueT, false, false>::Iterator;
     using TemplateCcMap<KeyT, ValueT, false, false>::KeySchema;
@@ -373,6 +374,10 @@ public:
                 }
 
                 Iterator it = End();
+                // Set when the command writes a value into its entry, found
+                // or just emplaced, while the heap is too full to take it:
+                // the command has reserved no memory for the value.
+                bool write_must_wait = false;
                 // If all data is in memory and deleted objects should be
                 // skipped, use Find instead of Emplace to avoid inserting a
                 // deleted CCE that would need removal.
@@ -396,8 +401,15 @@ public:
                 {
                     // DEL existing keys only decreases memory utilization
                     // therefore considered readonly here.
-                    it = FindEmplace(
-                        *look_key, false, req.IsReadOnly() || req.IsDelete());
+                    const bool writes_no_value =
+                        req.IsReadOnly() || req.IsDelete();
+                    it = FindEmplace(*look_key, false, writes_no_value);
+                    // End() carries a null entry: the key is absent and the
+                    // heap is full. The null-entry branch below handles that
+                    // case, so the payload check is skipped for it.
+                    write_must_wait = it->second != nullptr &&
+                                      !writes_no_value &&
+                                      UnreservedWriteMustWait();
                 }
                 cce = it->second;
                 ccp = it.GetPage();
@@ -432,10 +444,11 @@ public:
                     return true;
                 }
 
-                if (cce == nullptr)
+                if (cce == nullptr || write_must_wait)
                 {
                     // The apply request needs a new cc entry but the cc map has
-                    // reached the maximal capacity.
+                    // reached the maximal capacity, or it writes a value into
+                    // its entry and the heap is full.
                     if (txservice_skip_kv || ccm_has_full_entries_)
                     {
                         // If skip_kv or cache replacement is disabled, all data
@@ -1632,7 +1645,7 @@ public:
             auto it = FindEmplace(*key);
             cce = it->second;
             cc_page = it.GetPage();
-            if (cce == nullptr)
+            if (cce == nullptr || UnreservedWriteMustWait())
             {
                 DLOG(WARNING) << "!!!WARNING!!! UploadBatchCc OOM on core: "
                               << shard_->core_id_ << ". Txn: " << req.Txn()
@@ -1951,8 +1964,11 @@ public:
         // first time the request is processed
         auto it = FindEmplace(*look_key);
         cce = it->second;
-        if (cce == nullptr)
+        if (cce == nullptr || UnreservedWriteMustWait())
         {
+            // A new entry cannot be admitted, or the entry is there, found or
+            // just emplaced, and the heap is too full to apply a write that
+            // has no reservation.
             shard_->EnqueueWaitListIfMemoryFull(&req);
             return false;
         }
@@ -2319,7 +2335,10 @@ public:
                 continue;
             }
 
-            auto it = FindEmplace(key);
+            // Orphan lock recovery only looks the key up: the lock it
+            // recovers sits on an existing entry, so it never needs a new
+            // one. Log replay finds or emplaces the entry.
+            auto it = req.IsLockRecovery() ? Find(key) : FindEmplace(key);
             CcEntry<KeyT, ValueT, false, false> *cce = it->second;
             CcPage<KeyT, ValueT, false, false> *ccp = it.GetPage();
 
@@ -2340,10 +2359,10 @@ public:
                     Sharder::MapKeyHashToHashPartitionId(key_hash));
             };
 
-            // For orphan lock recovery, verify if the transaction still holds
-            // the lock on this CC entry.
             if (req.IsLockRecovery())
             {
+                // For orphan lock recovery, verify if the transaction still
+                // holds the lock on this CC entry.
                 if (const NonBlockingLock *key_lock =
                         cce != nullptr ? cce->GetKeyLock() : nullptr;
                     key_lock == nullptr ||
@@ -2352,13 +2371,18 @@ public:
                     offset += cmds_len;
                     continue;
                 }
+                // The transaction is committed and still holds the lock. Its
+                // commands are applied and the lock released whatever the
+                // heap's state: the orphaned write lock keeps the checkpoint
+                // below its timestamp, so waiting for memory here could wait
+                // on the very flush this lock blocks.
             }
-
-            if (cce == nullptr)
+            else if (cce == nullptr || UnreservedWriteMustWait())
             {
-                // The cc map has
-                // reached the maximal capacity. Blocks the request by putting
-                // it into wait list until capacity is avaliable.
+                // Either a new entry cannot be admitted, or the entry is
+                // there, found or just emplaced, and the heap is too full to
+                // apply commands that have no reservation. Blocks the request
+                // by putting it into wait list until capacity is avaliable.
                 req.SetOffset(prev_offset);
                 req.SetNextCore(next_core);
                 shard_->EnqueueWaitListIfMemoryFull(&req);

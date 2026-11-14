@@ -196,6 +196,26 @@ explicit caller. Trigger diagnostics record why scheduling occurred, not
 checkpoint completion; rate-limited or coalesced requests do not create a new
 accepted-request event.
 
+Each round is also one checkpoint cycle of the node (`CkptCycle`,
+`Checkpointer::ConcludedCkptCycles()`): the round starts a flush of every NG
+the node leads or is recovering, and the cycle concludes when all of those
+flushes have concluded. An NG's flush is one data sync operation
+(`DataSyncStatus`): the checkpointer, its coordinator, creates and enqueues the
+data sync operation's tasks, then signals that all of them are enqueued. The
+flush concludes when the data sync operation finalizes: with its timestamp
+advanced after every task finished, with nothing to flush, or with a failure.
+It also concludes when the round abandons the data sync operation after a
+leadership change. An NG whose timestamp a write lock pins at or below the last
+one is skipped. A flush still running keeps the cycle open. When a later
+round's checkpoint of a partition is merged into a checkpoint flush task an
+earlier round still has pending, the later round's data sync operation counts
+that task as one of its own unfinished tasks, so the later round concludes only
+when that task finishes or fails: a flush concludes every round that depended
+on it, one each, and no round concludes before the data it covers has landed. Shards use the count to bound how long a request may stay parked for
+memory ([03](03-concurrency-control.md)); the shard heap is shared by every NG
+the node hosts, which is why the cycle is per node. The node exports the count
+as the `checkpoint_cycles_concluded_total` metric.
+
 ## Cross-cutting invariants
 
 - A checkpoint timestamp never passes an active write whose outcome is not
@@ -220,6 +240,8 @@ accepted-request event.
 | The tx-side log abstraction provides write, checkpoint, replay, and transaction-recovery operations | `tx_service/include/txlog.h`; `tx_service/tx-log-protos/log_agent.h`; `tx_service/tx-log-protos/log_agent.cpp` |
 | Checkpoint timestamps are derived and advanced by the checkpointer | `tx_service/include/checkpointer.h`; `tx_service/src/checkpointer.cpp` |
 | Checkpoint triggers distinguish periodic, shutdown, memory-pressure, dirty-memory, and explicit requests | `tx_service/include/checkpointer.h`; `tx_service/src/checkpointer.cpp`; `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp`; `tx_service/src/cc/cc_req_misc.cpp` |
+| A round is one node-wide cycle, concluded when every NG's flush started by the round has concluded | `tx_service/include/data_sync_task.h` (`CkptCycle`, `DataSyncStatus::JoinCkptCycle`); `tx_service/src/data_sync_task.cpp`; `tx_service/src/checkpointer.cpp` (`Ckpt`); `tx_service/include/checkpointer.h` (`ConcludedCkptCycles`, `OnCkptCycleConcluded`) |
+| The concluded-cycle count is exported as a metric; live rounds merged into a held checkpoint flush task, and an NG's flush abandoned on a leadership change, are checked on a multi-node cluster | `tx_service/include/tx_service_metrics.h` (`NAME_CHECKPOINT_CYCLES_CONCLUDED_TOTAL`); `tx_service/src/data_sync_task.cpp` (`CkptCycle::Release`); EloqDoc `cmake/tests/multinode/ckpt_cycles.py` |
 | Dirty entries flow through data-sync tasks and the store durability barrier | `tx_service/include/data_sync_task.h`; `tx_service/src/data_sync_task.cpp`; `tx_service/src/cc/local_cc_shards.cpp`; `tx_service/include/store/data_store_handler.h` |
 | Range data-sync scan references are released on their source shard after consumption | `tx_service/include/cc/cc_request.h`; `tx_service/include/cc/local_cc_shards.h`; `tx_service/src/cc/local_cc_shards.cpp` |
 | Leader recovery replays all log groups under a candidate term before service | `tx_service/include/fault/cc_node.h`; `tx_service/src/fault/cc_node.cpp`; `tx_service/include/fault/log_replay_service.h`; `tx_service/src/fault/log_replay_service.cpp` |

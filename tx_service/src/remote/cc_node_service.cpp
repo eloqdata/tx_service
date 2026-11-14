@@ -817,7 +817,10 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
                                                      status);
 
             std::unique_lock<std::mutex> lk(status->mux_);
-            status->all_task_started_ = true;
+            if (status->EndEnqueuingLocked())
+            {
+                status->FinishLocked(nullptr);
+            }
             status->cv_.wait(
                 lk, [&status] { return status->unfinished_tasks_ == 0; });
 

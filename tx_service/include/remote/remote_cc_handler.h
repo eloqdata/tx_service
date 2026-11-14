@@ -60,7 +60,8 @@ public:
                       uint32_t hd_res_idx,
                       CcProtocol proto = CcProtocol::OCC,
                       IsolationLevel iso_level = IsolationLevel::ReadCommitted,
-                      bool abort_if_oom = false);
+                      bool abort_if_oom = false,
+                      size_t reserve_bytes = 0);
 
     void AcquireWriteAll(uint32_t src_node_id,
                          const TableName &table_name,

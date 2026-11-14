@@ -21,7 +21,9 @@
  */
 #include "fault/fault_inject.h"
 
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 
 #if defined(WITH_LOG_SERVICE) && defined(LOG_STATE_TYPE_RKDB_S3)
 #include "../../../eloq_log_service/include/fault_inject.h"  // txlog::FaultInject from eloq_log_service
@@ -323,6 +325,17 @@ void FaultInject::InjectFault(std::string fault_name, std::string paras)
         std::lock_guard<std::mutex> lk(mux_);
         injected_fault_map_.try_emplace(fault_name, fentry);
     }
+}
+
+void FaultInject::HoldWhileArmed(const std::string &fault_name,
+                                 const std::string &what)
+{
+    LOG(INFO) << fault_name << ": holding " << what;
+    while (Entry(fault_name) != nullptr)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    LOG(INFO) << fault_name << ": released " << what;
 }
 
 }  // namespace txservice

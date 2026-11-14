@@ -85,7 +85,12 @@ struct TxNode::Impl
     TableName table{std::string_view("test_table"),
                     TableType::Primary,
                     TableEngine::EloqKv};
-    uint64_t schema_version{1};
+    /**
+     * The version LocalCcShards::InitPrebuiltTables installs prebuilt schemas
+     * with; the mock key schema adopts it, so every request must carry it or
+     * the cc map rejects it as a schema mismatch.
+     */
+    uint64_t schema_version{LocalCcShards::kPrebuiltTableSchemaVersion};
 
     // Owning storage for the Start() arguments that take pointers.
     std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;

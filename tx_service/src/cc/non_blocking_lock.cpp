@@ -25,6 +25,7 @@
 #include <local_cc_shards.h>
 
 #include <cassert>
+#include <utility>
 
 #include "cc/cc_entry.h"
 #include "cc/cc_request.h"
@@ -382,6 +383,20 @@ bool NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
     return true;
 }
 
+void NonBlockingLock::ReleaseReservedBytes(CcShard *ccs)
+{
+    const size_t bytes = std::exchange(reserved_bytes_, 0);
+    if (bytes == 0)
+    {
+        return;
+    }
+    CcShardHeap *heap = ccs != nullptr ? ccs->GetShardHeap() : nullptr;
+    if (heap != nullptr)
+    {
+        heap->ReleaseReservation(bytes);
+    }
+}
+
 /**
  * @brief Release the write lock on this object (i.e. ccentry).
  *
@@ -399,6 +414,9 @@ bool NonBlockingLock::ReleaseWriteLock(TxNumber tx_number,
 
     write_lk_type_ = WriteLockType::NoWritelock;
     write_txn_ = 0;
+    // The old owner's charge goes back before any queued request is granted,
+    // so the next writer's reservation is checked against the real total.
+    ReleaseReservedBytes(ccs);
 
     if (ccs == nullptr)
     {
@@ -475,6 +493,10 @@ void NonBlockingLock::DowngradeWriteLock(TxNumber tx_number, CcShard *ccs)
 
     write_lk_type_ = WriteLockType::WriteIntent;
     assert(write_txn_ == tx_number);
+    // A charge lives only on a write lock. Downgrades happen on metadata
+    // paths, whose acquisitions reserve nothing, so this is normally a no-op;
+    // it keeps the rule exact if a charged lock is ever downgraded.
+    ReleaseReservedBytes(ccs);
 
     TryPopBlockingQueue(ccs);
 }
@@ -597,6 +619,7 @@ LockType NonBlockingLock::ClearTx(TxNumber tx_number,
 
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;
+        ReleaseReservedBytes(ccs);
         if (object != nullptr && return_type == LockType::WriteLock &&
             PopBlockCmdRequest(ccs, object))
         {

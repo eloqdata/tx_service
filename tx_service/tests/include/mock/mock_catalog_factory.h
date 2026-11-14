@@ -38,10 +38,29 @@ public:
         return UINT16_MAX;
     }
 
+    /**
+     * @brief The key schema's timestamp, which the cc map adopts as its
+     * schema version and checks every table request against.
+     *
+     * It must equal the table schema's version: the data-sync scan carries
+     * the table version and the cc map refuses a scan whose version differs
+     * from its own, so a mock that returned a constant here would make every
+     * checkpoint round on a store-backed TestNode fail and retry forever.
+     * @return The timestamp the owning table schema was built with.
+     */
     uint64_t SchemaTs() const override
     {
-        return 1;
+        return schema_ts_;
     }
+
+    /** @brief Sets the timestamp; called by the owning table schema. */
+    void SetSchemaTs(uint64_t ts)
+    {
+        schema_ts_ = ts;
+    }
+
+private:
+    uint64_t schema_ts_{1};  ///< See SchemaTs().
 };
 
 class MockRecordSchema : public txservice::RecordSchema
@@ -68,6 +87,10 @@ public:
           version_(version),
           key_schema_(std::make_unique<MockKeySchema>())
     {
+        // The cc map's schema version is the key schema's timestamp; keep it
+        // equal to the table version the engine installs, as production
+        // schemas do, so data-sync scans carrying the table version match.
+        key_schema_->SetSchemaTs(version);
         // Back VersionStringView() with an owning member; returning a view into
         // a std::to_string() temporary would dangle.
         version_str_ = std::to_string(version_);

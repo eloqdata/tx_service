@@ -518,9 +518,21 @@ public:
         return end_key_;
     }
 
-    bool AbortIfOom() const override
+    /**
+     * @brief A slice fill always fails fast.
+     *
+     * From StoreSlice::StartLoading() until the load commits or fails, the
+     * slice is being loaded and counts as a pin on its range, and a range
+     * split refuses to update a range with such a slice (StoreRange's slice
+     * update). A fill waiting for memory with no limit would block the split
+     * for that long. A rejected fill fails the load: the slice goes back to
+     * partially cached, and the requests waiting on it are aborted or
+     * re-enqueued by their own policy.
+     * @return MemoryWait::kFailFast.
+     */
+    MemoryWait MemoryWaitPolicy() const override
     {
-        return true;
+        return MemoryWait::kFailFast;
     }
 
     int32_t PartitionId() const;
@@ -612,6 +624,57 @@ public:
     /** Releases completed fetch data before publishing the request as idle. */
     void Free() override;
 
+    /**
+     * @brief How long this fetch may wait for shard memory before the record
+     * it fetched is installed (see Execute()).
+     *
+     * The fetch waits no longer than its least patient waiting request,
+     * since those requests wait exactly as long as the fetch does. One
+     * fail-fast request makes the fetch fail fast: that request holds a
+     * range read lock, and its waiting could block a range split, whoever
+     * else shares the fetch. Otherwise one bounded request makes it bounded.
+     *
+     * An issuer that passed no waiting request (log replay, standby
+     * forwarding and command upload, whose commands stay buffered on the
+     * entry) does not wait on the fetch and does not count. The policy says
+     * when the shard cleaner calls AbortCcRequest(); which waiting requests
+     * are then rejected is decided there, request by request.
+     * @return MemoryWait::kFailFast, MemoryWait::kBounded or
+     * MemoryWait::kUnbounded, in that order of precedence;
+     * MemoryWait::kUnbounded only when no request that can be rejected waits.
+     */
+    MemoryWait MemoryWaitPolicy() const override;
+
+    /**
+     * @brief Rejects the requests waiting on a fetch parked for shard memory
+     * whose own wait is over, and keeps the fetch for the others.
+     *
+     * With OUT_OF_MEMORY, from the shard cleaner, each waiting request is
+     * judged by its own policy: a fail-fast request is rejected; a bounded
+     * request is rejected once the fetch has stayed parked across the
+     * checkpoint-cycle bound (CcShard::MemoryWaitCyclesExhausted(), measured
+     * from the fetch's first park, whenever the request joined); an issuer
+     * that passed no waiting request, or a request that may wait without
+     * bound, is never rejected. A rejected request's pin on the entry is
+     * released before it is rejected with @p err_code.
+     *
+     * If anything is kept, the fetch lives on with the record it fetched:
+     * it goes back on the memory wait list while a bounded request still
+     * waits, and is re-enqueued to install the record at once when only
+     * issuers that cannot be rejected are left, so log replay never loses
+     * its fetch to a request that shared it.
+     *
+     * If nothing is kept, or the error is not OUT_OF_MEMORY, the fetched
+     * record is dropped as when the store read fails: the fetch's pin is
+     * released, every waiting request is rejected, and the fetch is removed
+     * from the shard's active fetches, which returns it to its pool or
+     * destroys it. If the node group's term changed while the fetch was
+     * parked, the entry is not touched and the waiting requests get
+     * NG_TERM_CHANGED instead. Runs on the owning shard.
+     * @param err_code The reason, OUT_OF_MEMORY from the shard cleaner.
+     */
+    void AbortCcRequest(CcErrorCode err_code) override;
+
     // table_name is a string view, cannot access it outside TxProcessor.
     TableName table_name_{
         std::string(""), TableType::Primary, TableEngine::None};
@@ -642,6 +705,44 @@ public:
     // If set only_fetch_archives_ (true), don't fetch record from base table.
     bool only_fetch_archives_{false};
     bool reopen_{false};
+
+private:
+    /**
+     * @brief Whether the fetch brought back a value to install: the current
+     * record, or at least one historical version that is not a tombstone.
+     * @return False for a missing or deleted key with no such version, which
+     * installs no value.
+     */
+    bool InstallsPayload() const;
+
+    /**
+     * @brief Whether the fetched record must wait for shard memory before it
+     * is installed.
+     *
+     * Checked once the store has answered and before anything is installed
+     * in the cc map: the reads waiting on the fetch hold no lock on the key
+     * yet, and the record is still in the store, so waiting or dropping it is
+     * safe. The test is whether the heap is already full (CcShardHeap::Full()),
+     * as in entry admission; the size of the fetched record is not weighed.
+     * A fetch that installs a value also starts defragmentation when the heap
+     * is fragmented, whether or not it must wait. A fetch does not wait when
+     * it installs no value, when no request that can be rejected waits on it
+     * (MemoryWaitPolicy() is MemoryWait::kUnbounded), or when its table is
+     * exempt from the shard memory limit (the meta tables and the sequence
+     * table, as in entry admission).
+     * @param ccs The owning shard.
+     * @return True when the heap is full and the fetch must park.
+     */
+    bool MustWaitForMemory(CcShard &ccs) const;
+
+    /**
+     * @brief Rejects every request waiting on this fetch, releasing the pin
+     * each holds on the entry first, then recycles the entry's key lock if
+     * nothing else uses it.
+     * @param ccs The owning shard.
+     * @param err_code The error the waiting requests are rejected with.
+     */
+    void AbortRequesters(CcShard &ccs, CcErrorCode err_code);
 };
 
 struct FetchBucketDataCc;
@@ -1397,20 +1498,24 @@ private:
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
-    // What to run once every core has applied its slice, instead of waking a
-    // thread parked in Wait(). The flush path installs a continuation that
-    // reports the partition complete to its PutAll coordinator, so a partition
-    // is only counted as done after the cc entries it wrote are marked clean --
-    // preserving the guarantee that PutAll returns with every ckpt ts already
-    // published, without anyone blocking to get it. It exists because both ends
-    // sit on threads that must not park: SetFinished() runs on a cc shard, and
-    // the flush path is driven from a data store completion callback.
-    //
-    // Runs on whichever shard finishes last. It may destroy this request's
-    // owner (the request lives inside the pooled partition state that the
-    // continuation can free), so SetFinished() moves it out, drops the lock,
-    // and touches no member afterwards. Consumed on invocation, so a pooled
-    // request cannot fire a stale continuation from an earlier flush.
+    /**
+     * @brief What to run once every core has applied its slice, instead of
+     * waking a thread parked in Wait().
+     *
+     * The flush path installs a continuation that reports the partition
+     * complete to its PutAll coordinator, so a partition is only counted as
+     * done after the cc entries it wrote are marked flushed. That preserves
+     * the guarantee that PutAll returns with every ckpt ts already published,
+     * without anyone blocking to get it. It exists because both ends sit on
+     * threads that must not park: SetFinished() runs on a cc shard, and the
+     * flush path is driven from a data store completion callback.
+     *
+     * @warning Runs on whichever shard finishes last. It may destroy this
+     * request's owner (the request lives inside the pooled partition state
+     * that the continuation can free), so SetFinished() moves it out, drops
+     * the lock, and touches no member afterwards. Consumed on invocation, so
+     * a pooled request cannot fire a stale continuation from an earlier flush.
+     */
     std::function<void()> on_finished_{nullptr};
 
     // Coroutine yield/resume support
@@ -1549,9 +1654,10 @@ private:
     /** Entries freed by this pass so far. */
     size_t freed_in_pass_{0};
     /**
-     * Bytes this pass reclaimed so far, summed over its eviction batches. A
-     * pass that ends under FLAGS_shard_clean_release_kb is not keeping up:
-     * it asks for a checkpoint and its retry backs off.
+     * Bytes this pass reclaimed so far, summed over its eviction batches; a
+     * release does not reset it. A pass that ends under
+     * FLAGS_shard_clean_release_kb found almost nothing evictable: it asks
+     * for a checkpoint and its retry backs off.
      */
     int64_t reclaimed_in_pass_{0};
     /**
@@ -1561,9 +1667,9 @@ private:
      */
     uint64_t park_snapshot_{0};
     /**
-     * Bytes this pass reclaimed since it started or last released a batch;
-     * after a limit hit the next release waits for
-     * FLAGS_shard_clean_release_kb of them.
+     * Bytes this pass reclaimed since it started or last released a batch.
+     * Once a request has parked since then, the next release waits until
+     * this reaches FLAGS_shard_clean_release_kb.
      */
     int64_t reclaimed_since_release_{0};
 };

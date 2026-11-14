@@ -84,6 +84,11 @@ public:
      * @param hres Result handler of the request
      * @param proto Concurrency control protocol
      * @param abort_if_oom Whether or not to abort the request if out of memory
+     * @param reserve_bytes Estimated size of the payload the transaction will
+     * install on this key at commit. The destination shard charges it to its
+     * memory ledger before the lock attempt, so admission sees memory promised
+     * to writers that have not installed yet. Zero for deletes and for callers
+     * without a record payload.
      */
     virtual void AcquireWrite(
         const TableName &table_name,
@@ -99,7 +104,8 @@ public:
         uint32_t hd_res_idx,
         CcProtocol proto,
         IsolationLevel iso_level,
-        bool abort_if_oom) = 0;
+        bool abort_if_oom,
+        size_t reserve_bytes = 0) = 0;
 
     /**
      * @brief Acquires write locks for the input key in all shards. This method

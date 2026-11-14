@@ -108,6 +108,19 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
                << " ,ckpt_delay_seconds: " << ckpt_delay_seconds;
 }
 
+void Checkpointer::OnCkptCycleConcluded()
+{
+    concluded_ckpt_cycles_.fetch_add(1, std::memory_order_acq_rel);
+    if (metrics::enable_metrics)
+    {
+        metrics::Meter *meter = local_shards_.GetNodeMeter();
+        if (meter != nullptr)
+        {
+            meter->Collect(metrics::NAME_CHECKPOINT_CYCLES_CONCLUDED_TOTAL, 1);
+        }
+    }
+}
+
 std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
     uint32_t node_group_id,
     bool is_last_ckpt,
@@ -469,6 +482,22 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         node_groups = Sharder::Instance().LocalNodeGroups();
     }
 
+    // The checkpoint cycle of this call (see CkptCycle). Each node group's
+    // data sync operation joins it below; a node group skipped below does not.
+    std::shared_ptr<CkptCycle> ckpt_cycle = std::make_shared<CkptCycle>();
+    /**
+     * Releases the checkpointer's hold on the cycle when the loop below is
+     * left, once every node group's flush has started.
+     */
+    struct ReleaseCycleHold
+    {
+        std::shared_ptr<CkptCycle> &cycle;  ///< The cycle of this call.
+        ~ReleaseCycleHold()
+        {
+            cycle->ReleaseCheckpointerHold();
+        }
+    } release_cycle_hold{ckpt_cycle};
+
     for (uint32_t node_group : node_groups)
     {
         int64_t leader_term = -1;
@@ -522,6 +551,22 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 is_standby_node ? standby_node_term : leader_term,
                 true,
                 DataSyncStatus::Origin::Checkpoint);
+        status->JoinCkptCycle(ckpt_cycle);
+        // Test hook: holds the checkpointer here, after this node group's
+        // data sync operation joined the cycle and before any leader term
+        // check, while the fault stays armed; "ng_id=<n>" limits it to node
+        // group n. A test moves the node group's leadership meanwhile and
+        // watches the data sync operation being abandoned below.
+        CODE_FAULT_INJECTOR("ckpt_hold_round_after_join", {
+            auto ng_param = fault_entry->map_para_.find("ng_id");
+            if (ng_param == fault_entry->map_para_.end() ||
+                std::stoul(ng_param->second) == node_group)
+            {
+                FaultInject::Instance().HoldWhileArmed(
+                    "ckpt_hold_round_after_join",
+                    "the checkpoint round of ng#" + std::to_string(node_group));
+            }
+        });
 
         uint64_t last_succ_ckpt_ts = UINT64_MAX;
         bool can_be_skipped = !is_last_ckpt;
@@ -590,6 +635,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         if (!is_standby_node &&
             Sharder::Instance().LeaderTerm(node_group) != leader_term)
         {
+            // The data sync operation is never finalized on this path: the
+            // checkpointer does not signal that all tasks are enqueued, so its
+            // tasks, if any, never bring its count to zero. Conclude this node
+            // group's flush in the cycle here so the cycle does not stay open
+            // forever.
+            status->LeaveCkptCycle();
             continue;
         }
 
@@ -622,9 +673,15 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         std::optional<DataSyncStatus::CheckpointResult> checkpoint_result;
         {
             std::unique_lock<std::mutex> task_sender_lk(status->mux_);
-            status->all_task_started_ = true;
-            if (status->unfinished_scan_tasks_ == 0 &&
-                status->unfinished_tasks_ != 0)
+            // Every task of this node group's data sync operation is enqueued.
+            // True when all have already ended, or none was created: the
+            // checkpointer then finishes the data sync operation, as the last
+            // task would have.
+            const bool last_task = status->EndEnqueuingLocked();
+            // Not for a data sync operation left with only the earlier
+            // checkpoint flush tasks it was merged into: it put nothing in
+            // the flush buffer.
+            if (status->WaitsForFlushBufferLocked())
             {
                 local_shards_.FlushCurrentFlushBuffer();
             }
@@ -637,7 +694,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                  { return status->unfinished_tasks_ == 0; });
             }
 
-            if (status->unfinished_tasks_ == 0)
+            // In the last checkpoint this also runs when a task ended last and
+            // DataSyncTask::SetFinish() already truncated the log: the two
+            // differ in when they broadcast the checkpoint ts to standbys.
+            if (last_task || is_last_ckpt)
             {
                 if (status->need_truncate_log_ &&
                     status->err_code_ == CcErrorCode::NO_ERROR)
@@ -692,8 +752,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                         }
                     }
                 }
-
-                checkpoint_result = status->TryFinalizeCheckpointLocked();
+            }
+            if (last_task)
+            {
+                checkpoint_result = status->FinishLocked(nullptr);
             }
         }
         if (checkpoint_result.has_value())

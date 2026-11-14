@@ -55,7 +55,8 @@ public:
                       uint32_t hd_res_idx,
                       CcProtocol proto,
                       IsolationLevel iso_level,
-                      bool abort_if_oom) override;
+                      bool abort_if_oom,
+                      size_t reserve_bytes = 0) override;
 
     void AcquireWriteAll(const TableName &table_name,
                          const TxKey &key,

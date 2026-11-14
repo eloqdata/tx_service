@@ -103,7 +103,11 @@ struct TestNode::Impl
     TableName table{std::string_view("test_table"),
                     TableType::Primary,
                     TableEngine::EloqKv};
-    uint64_t schema_version{1};
+    /**
+     * The version LocalCcShards::InitPrebuiltTables installs prebuilt schemas
+     * with; the mock key schema adopts it, and every request carries it.
+     */
+    uint64_t schema_version{LocalCcShards::kPrebuiltTableSchemaVersion};
 
     // Owning storage for the Start() arguments that take pointers.
     std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
@@ -298,35 +302,34 @@ TestNode::TestNode(const TestNodeOptions &options)
     impl.tx_ips = {"127.0.0.1"};
     impl.tx_ports = {tx_port};
 
-    // store_hd is passed as nullptr here even though the DSS/MemDataStore is
-    // brought up above. With skip_kv=true the engine keeps full entries in the
-    // cc maps and never routes data through the KV store, so a store handler is
-    // unnecessary for the data path. Crucially, the checkpointer thread is
+    // By default store_hd is passed as nullptr even though the DSS/MemDataStore
+    // is brought up above. With skip_kv=true the engine keeps full entries in
+    // the cc maps and never routes data through the KV store, so a store
+    // handler is unnecessary for the data path, and the checkpointer thread is
     // never spawned when store_hd_ == nullptr (Checkpointer ctor guard,
     // checkpointer.cpp), so no periodic data-sync runs against the
-    // in-memory-only prebuilt table: if we instead passed the real handler, the
-    // periodic checkpoint would try to data-sync the in-memory-only prebuilt
-    // table and InitCcm would abort (it has no store-side range/statistics to
-    // flush). The DSS bring-up is retained as scaffolding for a future
-    // storage-backed (skip_kv=false) fixture.
-    impl.tx_service =
-        std::make_unique<TxService>(tx_catalog_factory,
-                                    &MockSystemHandler::Instance(),
-                                    impl.conf,
-                                    node_id,
-                                    ng_id,
-                                    &impl.ng_configs,
-                                    cluster_config_version,
-                                    /*store_hd=*/nullptr,
-                                    /*log_hd=*/nullptr,
-                                    impl.options.enable_mvcc,
-                                    impl.options.skip_wal,
-                                    /*skip_kv=*/true,
-                                    /*enable_cache_replacement=*/false,
-                                    /*auto_redirect=*/true,
-                                    /*metrics_registry=*/nullptr,
-                                    /*common_labels=*/metrics::CommonLabels{},
-                                    &impl.prebuilt_tables);
+    // in-memory-only prebuilt table. A test that needs live checkpoint rounds
+    // opts in with TestNodeOptions::store_backed, which hands the real client
+    // over; the hash-partitioned prebuilt table then data-syncs through the
+    // in-memory store on every round.
+    impl.tx_service = std::make_unique<TxService>(
+        tx_catalog_factory,
+        &MockSystemHandler::Instance(),
+        impl.conf,
+        node_id,
+        ng_id,
+        &impl.ng_configs,
+        cluster_config_version,
+        impl.options.store_backed ? impl.store_hd.get() : nullptr,
+        /*log_hd=*/nullptr,
+        impl.options.enable_mvcc,
+        impl.options.skip_wal,
+        /*skip_kv=*/true,
+        /*enable_cache_replacement=*/false,
+        /*auto_redirect=*/true,
+        /*metrics_registry=*/nullptr,
+        /*common_labels=*/metrics::CommonLabels{},
+        &impl.prebuilt_tables);
 
     // braft needs a protocol prefix on the local path.
     const std::string local_path = "local://" + impl.dir.string();
@@ -435,8 +438,9 @@ bool TxHandle::Abort()
 // The test table is registered as a prebuilt table (see the TxService ctor in
 // TestNode), so these requests resolve a CcMap and run to completion. The
 // schema_version passed must match what the cc layer derives from the table's
-// KeySchema (MockKeySchema::SchemaTs() == 1, mirrored by TestNode's
-// schema_version), or InitCcm rejects the request as a schema mismatch.
+// KeySchema (MockKeySchema::SchemaTs(), which the mock sets to the version the
+// prebuilt schema is installed with, mirrored by TestNode's schema_version),
+// or InitCcm rejects the request as a schema mismatch.
 
 bool TxHandle::Upsert(int key, int value)
 {

@@ -3948,6 +3948,16 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
         {
             acquire_write.acquire_write_entries_[entry_idx++] = &write_entry;
 
+            // The payload each destination will install in PostWrite. Every
+            // destination that installs its own copy, forwarded ones
+            // included, reserves the full estimate; a delete installs
+            // nothing, whatever record pointer the entry still carries.
+            const size_t reserve_bytes =
+                write_entry.op_ != OperationType::Delete &&
+                        write_entry.rec_ != nullptr
+                    ? write_entry.rec_->MemUsage()
+                    : 0;
+
             // TODO: enable is_insert after Serializable Isolation is
             // supported.
             cc_handler_->AcquireWrite(
@@ -3964,7 +3974,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 res_idx++,
                 protocol_,
                 iso_level_,
-                abort_if_oom);
+                abort_if_oom,
+                reserve_bytes);
             for (auto &[forward_shard_code, cce_addr] :
                  write_entry.forward_addr_)
             {
@@ -3982,7 +3993,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                     res_idx++,
                     protocol_,
                     iso_level_,
-                    abort_if_oom);
+                    abort_if_oom,
+                    reserve_bytes);
             }
         }
     }

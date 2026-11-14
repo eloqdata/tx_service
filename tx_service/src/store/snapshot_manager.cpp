@@ -1286,7 +1286,10 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
     }
 
     std::unique_lock<std::mutex> task_sender_lk(data_sync_status->mux_);
-    data_sync_status->all_task_started_ = true;
+    if (data_sync_status->EndEnqueuingLocked())
+    {
+        data_sync_status->FinishLocked(nullptr);
+    }
 
     // Waiting for the flush task to be completed.
     data_sync_status->cv_.wait(

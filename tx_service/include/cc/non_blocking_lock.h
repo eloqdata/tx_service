@@ -77,8 +77,18 @@ public:
     NonBlockingLock(NonBlockingLock &&rhs) = delete;
     NonBlockingLock &operator=(NonBlockingLock &&rhs) = delete;
 
+    /**
+     * @brief Resets the lock to its empty state for reuse.
+     *
+     * Must not be used to discard a live write lock that still owns a payload
+     * reservation: call ReleaseReservedBytes() first, as
+     * LruEntry::ClearLocks() does. A reservation left here would leak from
+     * the shard's ledger, so it is asserted away.
+     */
     void Reset()
     {
+        assert(reserved_bytes_ == 0);
+        reserved_bytes_ = 0;
         read_intentions_.clear();
         read_locks_.clear();
         read_cnt_ = 0;
@@ -88,6 +98,44 @@ public:
         queue_block_cmds_.Reset();
         wlock_ts_ = 0;
     }
+
+    /**
+     * @brief Takes ownership of a payload reservation granted to the write
+     * lock's holder.
+     *
+     * Called when an acquire request that charged the shard heap is granted
+     * the write lock: the charge moves from the request to the lock without
+     * touching the heap's ledger. A lock may accumulate charges only from the
+     * same transaction, once per acquisition.
+     * @param bytes The charge transferred.
+     */
+    void AddReservedBytes(size_t bytes)
+    {
+        reserved_bytes_ += bytes;
+    }
+
+    /**
+     * @brief Bytes the write lock holds in the shard's reservation ledger.
+     * @return The lock-owned charge; 0 when the holder reserved nothing.
+     */
+    size_t ReservedBytes() const
+    {
+        return reserved_bytes_;
+    }
+
+    /**
+     * @brief Returns the lock-owned reservation to the shard heap.
+     *
+     * The one place write ownership gives its charge back. A charge lives
+     * only on a write lock, so this is called from every path that ends one:
+     * ReleaseWriteLock(), ClearTx(), DowngradeWriteLock(), and bulk lock
+     * reset. It only subtracts from the ledger: the cleaner picks the room up
+     * on its next execution, and nothing is parked when there is nobody to
+     * wake. Idempotent.
+     * @param ccs The shard owning the heap; null (unit tests) zeros the charge
+     * without a ledger to return it to.
+     */
+    void ReleaseReservedBytes(CcShard *ccs);
 
     /**
      * @brief Tries to acqurie the write lock. The operation succeeds, if no one
@@ -366,6 +414,14 @@ private:
 
     // The time when a write tx acquires the write lock on this lock.
     uint64_t wlock_ts_{0};
+
+    /**
+     * Payload bytes the write lock's holder reserved on the shard heap before
+     * the lock was granted (AcquireCc). Returned by ReleaseReservedBytes()
+     * when write ownership is discarded. Only the owning shard reads or
+     * writes it.
+     */
+    size_t reserved_bytes_{0};
 
     // blocking_queue_ stores the requests that 1) want to acquire
     // lock/intent but failed due to conflict, or 2) want to read a pk

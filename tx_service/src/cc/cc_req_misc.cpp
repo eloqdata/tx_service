@@ -52,8 +52,10 @@ DEFINE_uint64(shard_clean_release_kb,
               "Kilobytes the shard cleaner must reclaim, after a request found "
               "the shard heap at its limit, before it releases parked requests "
               "again. Released requests then follow the pace of eviction; a "
-              "larger value releases fewer, larger batches. Zero means any "
-              "reclaimed amount.");
+              "larger value releases fewer, larger batches. A cleaner pass "
+              "that reclaims less than this over its whole sweep found almost "
+              "nothing evictable: it asks for a checkpoint and its retry backs "
+              "off. Zero means any reclaimed amount.");
 
 namespace txservice
 {
@@ -958,6 +960,17 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         // if the referenced cce is already invalid, we do not need to care
         // about the fetch result and pending reqs since they are all
         // invalid.
+
+        // The store has answered and nothing is installed yet. On a full
+        // heap the fetch parks here; the shard cleaner re-enqueues it once
+        // there is room, or rejects the requests waiting on it
+        // (AbortCcRequest()).
+        if (MustWaitForMemory(ccs))
+        {
+            ccs.EnqueueWaitListIfMemoryFull(this);
+            return false;
+        }
+
         bool succ;
         if (only_fetch_archives_)
         {
@@ -989,18 +1002,9 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         }
         else
         {
-            for (CcRequestBase *req : requesters_)
-            {
-                // TODO(liunyl): key object forward req can only be aborted if
-                // term changes. retry if data store op failed.
-                if (req)
-                {
-                    // Release the pin added by the ccrequest.
-                    cce_->GetKeyGapLockAndExtraData()->ReleasePin();
-                    req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
-                }
-            }
-            cce_->RecycleKeyLock(ccs);
+            // TODO(liunyl): key object forward req can only be aborted if
+            // term changes. retry if data store op failed.
+            AbortRequesters(ccs, CcErrorCode::DATA_STORE_ERR);
         }
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
@@ -1102,6 +1106,184 @@ void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
     ccs_->Enqueue(this);
+}
+
+MemoryWait FetchRecordCc::MemoryWaitPolicy() const
+{
+    // The fetch waits no longer than its least patient waiting request.
+    // MemoryWait::kUnbounded is left only when no request that can be
+    // rejected waits.
+    MemoryWait policy = MemoryWait::kUnbounded;
+    for (const CcRequestBase *req : requesters_)
+    {
+        if (req == nullptr)
+        {
+            // Issued with no waiting request: nobody waits here.
+            continue;
+        }
+        const MemoryWait req_policy = req->MemoryWaitPolicy();
+        if (req_policy == MemoryWait::kFailFast)
+        {
+            return MemoryWait::kFailFast;
+        }
+        if (req_policy == MemoryWait::kBounded)
+        {
+            policy = MemoryWait::kBounded;
+        }
+    }
+    return policy;
+}
+
+bool FetchRecordCc::InstallsPayload() const
+{
+    if (!only_fetch_archives_ && rec_status_ == RecordStatus::Normal)
+    {
+        return true;
+    }
+    if (archive_records_ != nullptr)
+    {
+        for (const auto &archive_record : *archive_records_)
+        {
+            if (std::get<1>(archive_record) == RecordStatus::Normal)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool FetchRecordCc::MustWaitForMemory(CcShard &ccs) const
+{
+    CcShardHeap *heap = ccs.GetShardHeap();
+    if (heap == nullptr || error_code_ != 0 || !InstallsPayload())
+    {
+        return false;
+    }
+
+    int64_t allocated = 0, committed = 0;
+    const bool full = heap->Full(&allocated, &committed);
+    heap->StartDefragmentIfNeeded(allocated, committed);
+
+    return full && MemoryWaitPolicy() != MemoryWait::kUnbounded &&
+           !table_name_.IsMeta() && table_name_ != sequence_table_name;
+}
+
+void FetchRecordCc::AbortRequesters(CcShard &ccs, CcErrorCode err_code)
+{
+    for (CcRequestBase *req : requesters_)
+    {
+        if (req)
+        {
+            // Release the pin added by the ccrequest.
+            cce_->GetKeyGapLockAndExtraData()->ReleasePin();
+            req->AbortCcRequest(err_code);
+        }
+    }
+    cce_->RecycleKeyLock(ccs);
+}
+
+void FetchRecordCc::AbortCcRequest(CcErrorCode err_code)
+{
+    assert(err_code != CcErrorCode::NO_ERROR);
+    CcShard &ccs = *ccs_;
+
+    if (!ValidTermCheck())
+    {
+        // As in Execute(): the term changed while the fetch was parked and
+        // the cc map has been erased, so the entry must not be accessed.
+        for (CcRequestBase *req : requesters_)
+        {
+            if (req)
+            {
+                req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+            }
+        }
+    }
+    else if (lock_->GetCcEntry() != nullptr)
+    {
+        assert(lock_->GetCcMap() != nullptr);
+        assert(lock_->GetCcEntry() == cce_);
+
+        // A rejection for memory applies to each waiting request by its own
+        // policy, not to the fetch as a whole: a fail-fast request is
+        // rejected, a bounded one only once the fetch has waited out the
+        // checkpoint-cycle bound, and an issuer that waits on nothing (log
+        // replay and the like) or a request that may wait without bound is
+        // never rejected. Any other error rejects every waiting request.
+        //
+        // The loop below only sorts the waiting requests into the two lists;
+        // it rejects nobody.
+        const bool for_memory = err_code == CcErrorCode::OUT_OF_MEMORY;
+        const bool waited_out =
+            ccs.MemoryWaitCyclesExhausted(MemoryParkStamp());
+        std::vector<CcRequestBase *> rejected;
+        std::vector<CcRequestBase *> kept;
+        for (CcRequestBase *req : requesters_)
+        {
+            const MemoryWait policy = req == nullptr ? MemoryWait::kUnbounded
+                                                     : req->MemoryWaitPolicy();
+            const bool reject = !for_memory ||
+                                policy == MemoryWait::kFailFast ||
+                                (policy == MemoryWait::kBounded && waited_out);
+            // A null entry is never rejected for memory and has nothing to
+            // reject otherwise.
+            if (reject && req != nullptr)
+            {
+                rejected.push_back(req);
+            }
+            else
+            {
+                kept.push_back(req);
+            }
+        }
+
+        if (for_memory && !kept.empty())
+        {
+            // The fetch lives on for the requests it keeps, with the record
+            // it fetched, so the store is not read again. Only the requests
+            // sorted into `rejected` are rejected, here. The list is replaced
+            // before any abort hook runs.
+            requesters_.swap(kept);
+            for (CcRequestBase *req : rejected)
+            {
+                // Release the pin added by the ccrequest.
+                cce_->GetKeyGapLockAndExtraData()->ReleasePin();
+                req->AbortCcRequest(err_code);
+            }
+
+            if (MemoryWaitPolicy() == MemoryWait::kUnbounded)
+            {
+                // Nobody left can be rejected, so the fetch no longer waits:
+                // its next execution installs the record.
+                ccs.Enqueue(ccs.core_id_, this);
+            }
+            else
+            {
+                // Bounded requests still wait. Back on the wait list, not the
+                // shard queue: the park stamp is kept, so the wait is still
+                // measured from the first park, and the cleaner that is
+                // rejecting requests now finds the list occupied and defers
+                // instead of starting a new pass for a re-executed fetch.
+                ccs.EnqueueWaitListIfMemoryFull(this);
+            }
+            return;
+        }
+
+        // The fetch ends: there is no requester to be kept and all requesters
+        // are to be rejected. Drop the fetched record as a failed store read
+        // does: back-filling an unknown status installs nothing and releases
+        // the pin the fetch holds on the entry. AbortRequesters() then rejects
+        // every waiting request still in requesters_, releasing the pin each
+        // holds, and recycles the entry's key lock.
+        lock_->GetCcMap()->BackFill(
+            cce_, 0, RecordStatus::Unknown, std::string());
+        AbortRequesters(ccs, err_code);
+    }
+
+    // Removing the active owner returns this request to its pool or destroys
+    // it; nothing may touch it afterwards.
+    ccs.RemoveFetchRecordRequest(cce_);
 }
 
 bool RecoverDeadTxCc::Execute(CcShard &ccs)
@@ -1467,12 +1649,13 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     if (index == records.size())
     {
-        // This shard's entries are now clean, so entries the last eviction
-        // pass skipped as dirty are reclaimable. Restart its scan cursor and
-        // wake the pass if requests are parked waiting for memory -- doing it
-        // here, on the shard that was just updated, keeps the notification in
-        // step with the flush rather than deferring it to the end of the whole
-        // flush task.
+        // The entries this request covers on this shard are now flushed, so
+        // the cleaner may evict the ones it skipped as dirty.
+        // CcShard::OnDirtyDataFlushed() starts a deferred cleaner pass at
+        // once, or marks a pass still running to sweep once more from the LRU
+        // head. Calling it here, on the shard just updated, keeps the
+        // notification in step with the flush instead of waiting for the
+        // whole flush task to end.
         ccs.OnDirtyDataFlushed();
         SetFinished();
     }
@@ -1676,43 +1859,84 @@ void RestoreCcMapCc::DecodedDataItem(
 }
 
 /**
- * One execution of the shard cleaner's pass.
+ * @brief Advances the shard cleaner's pass by one execution.
  *
  * Terms:
- *   hard limit  CcShardHeap::Full(): allocated at the limit (or, with
- *               defragmentation, committed over it). Requests park here.
- *   target      CcShardHeap::NeedMoreCleaning(): less than 5% of the limit
- *               free. A pass that has started evicts down to it.
- *   tail        the pass has visited every page of the LRU chain.
+ *   hard limit  CcShardHeap::Full(): allocated plus reserved at the limit
+ *               (or, with defragmentation, committed over it). Reserved
+ *               bytes are payloads promised to writers that have not
+ *               installed yet; every figure below except the reclaimed
+ *               amount counts them as used.
+ *   park        a request whose memory does not fit below the hard limit
+ *               waits on the shard's wait list; every park is counted
+ *               (CcShard::MemoryParkCount()).
+ *   target      CcShardHeap::NeedMoreCleaning(): the heap is above the
+ *               target while less than 5% of the limit is free, counting
+ *               reservations. A pass that has started evicts down to it.
+ *   pass        one sweep of the LRU chain from its head, started when the
+ *               cleaner is scheduled; it reaches the tail once it has visited
+ *               every page.
  *
- * Each execution does at most one eviction batch (CcShard::Clean, 10 pages or
- * 30 us), then at most one release of 20 parked requests, then decides:
- *   evict    while pages remain and the heap is above the target, or a
- *            request found the heap at its hard limit since this pass started
- *            or last released a batch, or the defrag path's rule asks for it.
- *   release  below the hard limit, with requests parked, unless a request
- *            found the heap at its hard limit since this pass started or last
- *            released a batch (the park count reveals it, whoever parked):
- *            the room handed out is used up, so the next batch goes out once
- *            the pass has reclaimed FLAGS_shard_clean_release_kb more. The
- *            waiters thus follow the pace of eviction instead of waiting for
- *            a share of the heap. At the tail no further batch can add to
- *            that, so whatever the pass reclaimed since its last release goes
- *            out before the pass ends; an execution that starts at the tail
- *            reclaims nothing, releases nothing and lets the pass end.
- *   idle     nothing parked and nothing to evict. The retry backoff clears:
- *            the episode of pressure it paced is over.
- *   continue pages remain and there is something to evict.
- *   end      otherwise: at the tail with requests parked, or at the hard
- *            limit with nothing this pass may evict. Abort the requests that
- *            opted into OOM failure if the heap is full or the pass freed
- *            nothing; if the pass reclaimed less than
- *            FLAGS_shard_clean_release_kb, eviction is not keeping up, so
- *            ask for a checkpoint and lengthen the retry delay; then run once
- *            more if a flush landed mid-pass, stop (clearing the backoff) if
- *            nothing is parked, or defer (CcShard::DeferCleanPass) otherwise.
- * The continuation is enqueued with the shard's own producer token, as the
- * released batch is, so it runs after every released request has either
+ * One execution takes these steps in order:
+ *   1. Evict one batch (CcShard::Clean(): 10 pages or 30 us), if the pass
+ *      has not reached the tail and any of these holds:
+ *      - the heap is above the target;
+ *      - a request has parked since this pass started or last released: its
+ *        memory did not fit, however much room the target leaves;
+ *      - the heap is at the hard limit and the defragmentation path's rule
+ *        (CcShardHeap::NeedCleanShard()) asks for eviction.
+ *   2. Release 20 parked requests, if requests are parked, the heap is below
+ *      the hard limit, and any of these holds:
+ *      - no request has parked since this pass started or last released, so
+ *        the free room is not known to be used up;
+ *      - a request has parked since this pass started or last released, and
+ *        the pass has reclaimed FLAGS_shard_clean_release_kb since then,
+ *        summed over its batches. That request found the heap at its hard
+ *        limit, so releasing at once would hand the waiters the same full
+ *        heap; the next release instead waits for that much eviction, and
+ *        the waiters follow its pace;
+ *      - a request has parked since this pass started or last released, and
+ *        the pass is at the tail and has reclaimed anything since then:
+ *        eviction can reclaim no more.
+ *      A release re-enqueues the cleaner and ends this execution.
+ *   3. Otherwise end with one outcome. Step 1's condition is checked again:
+ *      when it holds, eviction is still wanted. That says the heap still
+ *      needs room, not that evictable pages are left.
+ *      idle      eviction is not wanted and nothing is parked: the pass ends
+ *                and the retry backoff clears, as the episode of pressure it
+ *                paced is over.
+ *      continue  eviction is still wanted and the pass has not reached the
+ *                tail: re-enqueue, so the next execution evicts the next
+ *                batch.
+ *      end       otherwise: the pass reached the tail while eviction is still
+ *                wanted, or requests are parked at the hard limit while
+ *                eviction is not wanted, so this pass may evict nothing.
+ *                - Abort the requests that may not wait for memory
+ *                  (MemoryWait::kFailFast) if the heap is full or the pass
+ *                  freed nothing, and any request that may be rejected
+ *                  (not log replay, not a write forwarded to a standby)
+ *                  parked across FLAGS_shard_memory_wait_ckpt_cycles
+ *                  concluded checkpoint cycles
+ *                  (CcShard::AbortRequestsAfterMemoryFree()).
+ *                - Ask for a checkpoint if the pass reached the tail with
+ *                  requests still parked, however much it reclaimed, or if it
+ *                  reclaimed less than FLAGS_shard_clean_release_kb over the
+ *                  whole pass (not since the last release), meaning the sweep
+ *                  found almost nothing evictable. Do not ask if a flush or
+ *                  range split completed on this shard during the pass
+ *                  (CcShard::TakeCleanRescanRequest()): the pass that runs
+ *                  next decides. Do not ask while this shard's heap is being
+ *                  defragmented or a data sync operation is running either.
+ *                - Then run once more at once if a flush or range split
+ *                  completed on this shard during the pass, stop (clearing
+ *                  the backoff) if nothing is parked, or defer
+ *                  (CcShard::DeferCleanPass()). The retry delay doubles after
+ *                  a pass that reclaimed less than
+ *                  FLAGS_shard_clean_release_kb over the whole pass, since
+ *                  sweeping such a chain again soon finds no more.
+ *
+ * Re-enqueuing uses the shard's own producer token, as the released requests
+ * do, so the next execution runs after every released request has either
  * finished or parked again.
  * @param ccs The shard whose pass this execution advances.
  * @return true once the cleaner is idle and a later park may schedule it
@@ -1729,8 +1953,14 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         return true;
     }
 
+    // Full() and the eviction target count reserved bytes as used; the
+    // allocator's own figure (heap_alloc) is kept for measuring what the
+    // pass reclaimed, since a reservation returned mid-pass is not an evicted
+    // entry.
     int64_t heap_alloc = 0, heap_commit = 0;
     bool heap_full = shard_heap->Full(&heap_alloc, &heap_commit);
+    auto effective_alloc = [&]() -> int64_t
+    { return heap_alloc + static_cast<int64_t>(shard_heap->ReservedBytes()); };
     if (!pass_started_)
     {
         // A pass starts from the LRU head and visits every page, so a flush
@@ -1744,25 +1974,27 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         ccs.TakeCleanRescanRequest();
     }
 
-    // A park means a request found the heap at its hard limit at that moment,
-    // whoever parked: the room this pass had when it started, or handed out
-    // at its last release, is used up.
+    // A request that has parked since this pass started or last released,
+    // whichever request it was, found the heap at its hard limit: the room the
+    // pass started with, or the room its last release handed out, is used up.
     const bool parked_since_release = ccs.MemoryParkCount() != park_snapshot_;
     // With cache replacement disabled there is nothing to sweep: the pass is
     // over before it starts, and the cleaner only releases or defers.
     bool at_tail = !txservice_enable_cache_replacement || ccs.OutOfMemory();
-    bool below_target = shard_heap->NeedMoreCleaning(heap_alloc);
+    bool above_target = shard_heap->NeedMoreCleaning(effective_alloc());
     // Full() with allocated memory under the target happens only with
     // defragmentation, when committed memory is over the limit;
     // NeedCleanShard() keeps that path's rule of evicting only above its
     // high-water mark.
     auto want_evict = [&]()
     {
-        return below_target || parked_since_release ||
+        int64_t effective = effective_alloc();
+        return above_target || parked_since_release ||
                (heap_full &&
-                shard_heap->NeedCleanShard(heap_alloc, heap_commit));
+                shard_heap->NeedCleanShard(effective, heap_commit));
     };
 
+    // Step 1: evict one batch.
     if (!at_tail && want_evict())
     {
         const int64_t alloc_before = heap_alloc;
@@ -1770,23 +2002,21 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         freed_in_pass_ += freed;
         at_tail = !more;
         heap_full = shard_heap->Full(&heap_alloc, &heap_commit);
-        below_target = shard_heap->NeedMoreCleaning(heap_alloc);
+        above_target = shard_heap->NeedMoreCleaning(effective_alloc());
         const int64_t reclaimed =
             std::max<int64_t>(0, alloc_before - heap_alloc);
         reclaimed_since_release_ += reclaimed;
         reclaimed_in_pass_ += reclaimed;
     }
 
-    // After a limit hit, the next release waits until the pass has reclaimed
-    // the configured amount since the last one, so the waiters follow the
-    // pace of eviction, however small each step. At the tail no further batch
-    // can add to that, so whatever was reclaimed goes out before the pass
-    // ends; an execution that starts at the tail reclaims nothing, so a
-    // request that keeps parking there cannot keep the pass alive: the pass
-    // ends and the retry is paced by the backoff.
-    // Zero means any reclaimed amount: at least one byte, so that nothing
-    // reclaimed never passes for enough and a request that keeps parking at
-    // the tail cannot be released again and again.
+    // Step 2: release 20 parked requests. If a request has parked since this
+    // pass started or last released, the room the last release handed out is
+    // used up, so the next release waits until the pass has reclaimed
+    // release_bytes since then. At the tail eviction can reclaim no more, so
+    // any amount is enough; with none, nothing is released, so a request that
+    // keeps parking at the tail cannot keep the pass alive, and its retry is
+    // paced by the backoff. A setting of zero counts as one byte, so that
+    // reclaiming nothing never qualifies.
     const int64_t release_bytes = std::max<int64_t>(
         1, static_cast<int64_t>(FLAGS_shard_clean_release_kb) * 1024);
     if (!heap_full && ccs.WaitListSizeForMemory() > 0 &&
@@ -1800,43 +2030,59 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         return false;
     }
 
-    const bool more_to_evict = want_evict();
-    if (!more_to_evict && ccs.WaitListSizeForMemory() == 0)
+    // Step 3: end the execution as idle, continue or end of pass. Eviction
+    // is still wanted while the heap needs room, whether or not evictable
+    // pages are left.
+    const bool eviction_wanted = want_evict();
+    if (!eviction_wanted && ccs.WaitListSizeForMemory() == 0)
     {
         pass_started_ = false;
         ccs.ResetCleanStart();
         ccs.ResetCleanBackoff();
         return true;
     }
-    if (more_to_evict && !at_tail)
+    if (eviction_wanted && !at_tail)
     {
         ccs.Enqueue(ccs.core_id_, this);
         return false;
     }
 
-    // End of pass.
-    if (heap_full || freed_in_pass_ == 0)
-    {
-        // Only requests that opted in: their range read locks can block the
-        // very data sync that would make entries evictable.
-        ccs.AbortRequestsAfterMemoryFree();
-    }
-    // A pass that reclaimed less than one release-worth is not keeping up:
-    // what is left on the chain is dirty, locked or pinned, and a flush is
-    // what changes that. Ask for a checkpoint now and slow the retries.
+    // End of pass: it reached the tail while eviction is still wanted, or
+    // requests are parked at the hard limit while eviction is not wanted.
+    // Requests that may not wait for memory (MemoryWait::kFailFast) are
+    // rejected when the heap is full or the pass freed nothing, since their
+    // wait could block a range split. Requests that have stayed parked across
+    // the configured number of concluded checkpoint cycles are rejected
+    // regardless of fullness, except log replay and writes forwarded to a
+    // standby (MemoryWait::kUnbounded): a request can fail to fit below the
+    // limit, and a rule gated on Full()
+    // would never reach it.
+    ccs.AbortRequestsAfterMemoryFree(heap_full || freed_in_pass_ == 0);
+    // Whether the sweep found at least release_bytes of evictable entries
+    // over the whole pass, releases included. A pass that found less left a
+    // chain of dirty, locked or pinned entries, which only a flush changes.
     const bool productive = reclaimed_in_pass_ >= release_bytes;
-    if (!productive && !shard_heap->IsDefragHeapCcOnFly())
+    // A flush or range split completed on this shard during the pass, so
+    // entries the pass already swept past may be evictable now.
+    const bool rescan = ccs.TakeCleanRescanRequest();
+    // Ask for a checkpoint when eviction cannot make the room that is needed:
+    // the pass reached the tail with requests still parked, however much it
+    // reclaimed, or the sweep found almost nothing evictable. Not when a flush
+    // or range split completed on this shard during the pass: the pass that
+    // runs next, at once, decides. Not while this shard's heap is being
+    // defragmented, since the defragmentation request releases parked
+    // requests itself, nor while a data sync operation is running, whose
+    // flushes make entries evictable.
+    const bool parked_at_tail = at_tail && ccs.WaitListSizeForMemory() > 0;
+    if (!rescan && (parked_at_tail || !productive) &&
+        !shard_heap->IsDefragHeapCcOnFly() && !ccs.IsOngoingDataSync())
     {
-        Checkpointer *ckpter = Sharder::Instance().GetCheckpointer();
-        if (ckpter != nullptr && !ckpter->IsOngoingDataSync())
-        {
-            ccs.NotifyCkpt(true, "memory_pressure");
-        }
+        ccs.NotifyCkpt(true, "memory_pressure");
     }
     pass_started_ = false;
     ccs.ResetCleanStart();
 
-    if (ccs.TakeCleanRescanRequest())
+    if (rescan)
     {
         ccs.Enqueue(ccs.core_id_, this);
         return false;

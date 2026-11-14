@@ -349,6 +349,8 @@ LocalCcShards::LocalCcShards(
                                  "persist",
                                  "metadata",
                                  "unknown"}}});
+        node_meter_->Register(metrics::NAME_CHECKPOINT_CYCLES_CONCLUDED_TOTAL,
+                              metrics::Type::Counter);
         node_meter_->Register(metrics::NAME_CLUSTER_GATE_PAUSED,
                               metrics::Type::Gauge,
                               std::move(gate_paused_metric_labels));
@@ -1322,8 +1324,9 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
             {
                 ng_it.first->second.InitSchema(
                     GetCatalogFactory(table.Engine())
-                        ->CreateTableSchema(table, image, 2),
-                    2);
+                        ->CreateTableSchema(
+                            table, image, kPrebuiltTableSchemaVersion),
+                    kPrebuiltTableSchemaVersion);
             }
         }
     }
@@ -2506,22 +2509,6 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
             // Create task limiter
             auto limiter = task_limiters_.emplace(
                 task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
-            // Update `latest_pending_task_ts` to higher ts if this task can be
-            // skipped(also means it's `data_sync_ts_` can be adjusted).
-            if (can_be_skipped)
-            {
-                limiter.first->second->latest_pending_task_ts_ = data_sync_ts;
-            }
-            // Relase `task_limiter_mux_`
-            task_limiter_lk.unlock();
-
-            // Push task to worker task queue.
-            std::lock_guard<std::mutex> task_worker_lk(
-                data_sync_worker_ctx_.mux_);
-            std::deque<std::shared_ptr<DataSyncTask>> &task_queue =
-                data_sync_task_queue_[range_info->PartitionId() %
-                                      data_sync_task_queue_.size()];
-
             auto task =
                 std::make_shared<DataSyncTask>(table_name,
                                                range_info->PartitionId(),
@@ -2537,6 +2524,24 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                                                false,
                                                false,
                                                high_priority);
+            // A checkpoint flush task is the partition's ckpt_flush_task_
+            // until it starts: later checkpoint rounds merge into it.
+            if (can_be_skipped)
+            {
+                limiter.first->second->latest_ckpt_flush_ts_ = data_sync_ts;
+                limiter.first->second->ckpt_flush_task_ = task;
+            }
+            // Relase `task_limiter_mux_`
+            task_limiter_lk.unlock();
+            status->RegisterTasks();
+
+            // Push task to worker task queue.
+            std::lock_guard<std::mutex> task_worker_lk(
+                data_sync_worker_ctx_.mux_);
+            std::deque<std::shared_ptr<DataSyncTask>> &task_queue =
+                data_sync_task_queue_[range_info->PartitionId() %
+                                      data_sync_task_queue_.size()];
+
             if (high_priority)
             {
                 task_queue.push_front(std::move(task));
@@ -2554,30 +2559,37 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                 assert(hres == nullptr);
                 assert(!high_priority);
                 // '0' means have no pending task on queue.
-                if (iter->second->latest_pending_task_ts_ == 0)
+                if (iter->second->latest_ckpt_flush_ts_ == 0)
                 {
-                    iter->second->latest_pending_task_ts_ = data_sync_ts;
-                    iter->second->pending_tasks_.push_back(
-                        std::make_shared<DataSyncTask>(
-                            table_name,
-                            range_info->PartitionId(),
-                            range_info->VersionTs(),
-                            ng_id,
-                            ng_term,
-                            data_sync_ts,
-                            status,
-                            is_dirty,
-                            can_be_skipped,
-                            hres));
+                    auto pending = std::make_shared<DataSyncTask>(
+                        table_name,
+                        range_info->PartitionId(),
+                        range_info->VersionTs(),
+                        ng_id,
+                        ng_term,
+                        data_sync_ts,
+                        status,
+                        is_dirty,
+                        can_be_skipped,
+                        hres);
+                    iter->second->latest_ckpt_flush_ts_ = data_sync_ts;
+                    iter->second->ckpt_flush_task_ = pending;
+                    status->RegisterTasks();
+                    iter->second->pending_tasks_.push_back(std::move(pending));
                     return true;
                 }
                 else
                 {
                     // Already has one pending task on the pending queue. We
-                    // just update `latest_pending_task_ts_`.
-                    iter->second->latest_pending_task_ts_ = std::max(
-                        iter->second->latest_pending_task_ts_, data_sync_ts);
+                    // just update `latest_ckpt_flush_ts_`. ckpt_flush_task_
+                    // flushes this cycle's data for the range, so this data
+                    // sync operation cannot truncate the log, and it counts
+                    // ckpt_flush_task_ as one of its unfinished tasks.
+                    iter->second->latest_ckpt_flush_ts_ = std::max(
+                        iter->second->latest_ckpt_flush_ts_, data_sync_ts);
                     status->SetNoTruncateLog();
+                    assert(iter->second->ckpt_flush_task_ != nullptr);
+                    iter->second->ckpt_flush_task_->AbsorbStatus(status);
                     return false;
                 }
             }
@@ -2601,6 +2613,7 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                                                    false,
                                                    false,
                                                    high_priority);
+                status->RegisterTasks();
                 if (high_priority)
                 {
                     iter->second->pending_tasks_.push_front(std::move(task));
@@ -2685,6 +2698,9 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
     // split range transaction.
     // 2. For the remaining subranges, there is only one task for them. So there
     // is no need to construct a limiter.
+    // Count the old range's task and one per new range before any is visible
+    // to a worker.
+    status->RegisterTasks(new_keys->size() + 1);
     std::unique_lock<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
 
     TxKey old_start_key = range_entry->GetRangeInfo()->StartTxKey();
@@ -2740,16 +2756,12 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
 
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
-
-        status->unfinished_tasks_ += (new_keys->size() + 1);
-        status->unfinished_scan_tasks_ += (new_keys->size() + 1);
-        status->all_task_started_ = true;
-        if (status->unfinished_tasks_ == 0)
+        if (status->EndEnqueuingLocked())
         {
-            hres->SetFinished();
+            status->FinishLocked(hres);
             return;
         }
-        else if (status->unfinished_scan_tasks_ == 0)
+        else if (status->WaitsForFlushBufferLocked())
         {
             FlushCurrentFlushBuffer();
             return;
@@ -2784,15 +2796,6 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
         // Create task limiter
         auto limiter = task_limiters_.emplace(
             task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
-        // Update `latest_pending_task_ts` to higher ts if this task can be
-        // skipped(also means it's `data_sync_ts_` can be adjusted).
-        if (can_be_skipped)
-        {
-            limiter.first->second->latest_pending_task_ts_ = data_sync_ts;
-        }
-        // Relase `task_limiter_mux_`
-        task_limiter_lk.unlock();
-
         auto task = std::make_shared<DataSyncTask>(table_name,
                                                    core_idx,
                                                    0,
@@ -2806,6 +2809,16 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    filter_lambda,
                                                    send_cache_for_migration,
                                                    is_standby_node);
+        // A checkpoint flush task is the partition's ckpt_flush_task_ until it
+        // starts: later checkpoint rounds merge into it.
+        if (can_be_skipped)
+        {
+            limiter.first->second->latest_ckpt_flush_ts_ = data_sync_ts;
+            limiter.first->second->ckpt_flush_task_ = task;
+        }
+        // Relase `task_limiter_mux_`
+        task_limiter_lk.unlock();
+        status->RegisterTasks();
 
         // Push task to worker task queue.
         {
@@ -2823,10 +2836,9 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
             assert(hres == nullptr);
             // '0' means have no pending task on queue. so we push this task
             // to PendingTaskQueue
-            if (iter->second->latest_pending_task_ts_ == 0)
+            if (iter->second->latest_ckpt_flush_ts_ == 0)
             {
-                iter->second->latest_pending_task_ts_ = data_sync_ts;
-                iter->second->pending_tasks_.push_back(
+                auto pending =
                     std::make_shared<DataSyncTask>(table_name,
                                                    core_idx,
                                                    0,
@@ -2839,16 +2851,25 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    hres,
                                                    filter_lambda,
                                                    send_cache_for_migration,
-                                                   is_standby_node));
+                                                   is_standby_node);
+                iter->second->latest_ckpt_flush_ts_ = data_sync_ts;
+                iter->second->ckpt_flush_task_ = pending;
+                status->RegisterTasks();
+                iter->second->pending_tasks_.push_back(std::move(pending));
                 enqueued_task = true;
             }
             else
             {
                 // Already has one pending task on the PendingTaskQueue. We
-                // just update `latest_pending_task_ts_` to higher ts.
-                iter->second->latest_pending_task_ts_ = std::max(
-                    iter->second->latest_pending_task_ts_, data_sync_ts);
+                // just update `latest_ckpt_flush_ts_` to higher ts.
+                // ckpt_flush_task_ flushes this cycle's data for this core, so
+                // this data sync operation cannot truncate the log, and it
+                // counts ckpt_flush_task_ as one of its unfinished tasks.
+                iter->second->latest_ckpt_flush_ts_ =
+                    std::max(iter->second->latest_ckpt_flush_ts_, data_sync_ts);
                 status->SetNoTruncateLog();
+                assert(iter->second->ckpt_flush_task_ != nullptr);
+                iter->second->ckpt_flush_task_->AbsorbStatus(status);
             }
         }
         else
@@ -2857,6 +2878,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
             // LastCheckpoint). Because these operations need to explicitly
             // flush data into storage, rather than relying on other
             // checkpoint tasks.
+            status->RegisterTasks();
             iter->second->pending_tasks_.push_back(
                 std::make_shared<DataSyncTask>(table_name,
                                                core_idx,
@@ -2893,7 +2915,6 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     last_data_sync_ts = UINT64_MAX;
-    uint32_t unfinished_task_cnt = 0;
 
     if (table_name.IsHashPartitioned())
     {
@@ -2914,21 +2935,20 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 
         auto core_count = cc_shards_.size();
 
+        // Each enqueued task registers itself with status before a worker
+        // can see it (DataSyncStatus::RegisterTasks).
         for (size_t core_idx = 0; core_idx < core_count; ++core_idx)
         {
-            if (EnqueueDataSyncTaskToCore(table_name,
-                                          ng_id,
-                                          ng_term,
-                                          data_sync_ts,
-                                          core_idx,
-                                          is_standby_node,
-                                          is_dirty,
-                                          can_be_skipped,
-                                          status,
-                                          hres))
-            {
-                unfinished_task_cnt++;
-            }
+            EnqueueDataSyncTaskToCore(table_name,
+                                      ng_id,
+                                      ng_term,
+                                      data_sync_ts,
+                                      core_idx,
+                                      is_standby_node,
+                                      is_dirty,
+                                      can_be_skipped,
+                                      status,
+                                      hres);
         }
     }
     else
@@ -2946,43 +2966,36 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
             return;
         }
 
+        // Each enqueued task registers itself with status before a worker
+        // can see it (DataSyncStatus::RegisterTasks).
         for (auto &range : *ranges)
         {
-            if (EnqueueRangeDataSyncTask(table_name,
-                                         ng_id,
-                                         ng_term,
-                                         range.second.get(),
-                                         data_sync_ts,
-                                         is_dirty,
-                                         can_be_skipped,
-                                         last_data_sync_ts,
-                                         status,
-                                         hres))
-            {
-                // Increment local variable to reduce lock contention.
-                unfinished_task_cnt++;
-            }
+            EnqueueRangeDataSyncTask(table_name,
+                                     ng_id,
+                                     ng_term,
+                                     range.second.get(),
+                                     data_sync_ts,
+                                     is_dirty,
+                                     can_be_skipped,
+                                     last_data_sync_ts,
+                                     status,
+                                     hres);
         }
 
         meta_lk.unlock();
     }
 
+    // With a result handle this call is the data sync operation's coordinator
+    // and signals that all tasks are enqueued; without one, the caller is.
+    if (hres != nullptr)
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
-        status->unfinished_tasks_ += unfinished_task_cnt;
-        status->unfinished_scan_tasks_ += unfinished_task_cnt;
-        if (hres)
+        if (status->EndEnqueuingLocked())
         {
-            status->all_task_started_ = true;
-            if (status->unfinished_tasks_ == 0)
-            {
-                hres->SetFinished();
-                return;
-            }
+            status->FinishLocked(hres);
+            return;
         }
-
-        if (status->unfinished_scan_tasks_ == 0 &&
-            status->unfinished_tasks_ != 0 && status->all_task_started_)
+        if (status->WaitsForFlushBufferLocked())
         {
             FlushCurrentFlushBuffer();
             return;
@@ -3005,7 +3018,8 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>(
         ng_id, ng_term, false, DataSyncStatus::Origin::Migration);
-    uint32_t unfinished_task_cnt = 0;
+    // Each enqueued task registers itself with status before a worker can see
+    // it (DataSyncStatus::RegisterTasks).
     for (auto &[range_table_name, range_ids] : ranges_in_bucket_snapshot)
     {
         TableType type;
@@ -3028,18 +3042,18 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
             uint64_t last_sync_ts = 0;
             auto range_entry =
                 GetTableRangeEntryInternal(range_table_name, ng_id, range_id);
-            if (range_entry && EnqueueRangeDataSyncTask(table_name,
-                                                        ng_id,
-                                                        ng_term,
-                                                        range_entry,
-                                                        data_sync_ts,
-                                                        false,
-                                                        false,
-                                                        last_sync_ts,
-                                                        status,
-                                                        hres))
+            if (range_entry)
             {
-                unfinished_task_cnt++;
+                EnqueueRangeDataSyncTask(table_name,
+                                         ng_id,
+                                         ng_term,
+                                         range_entry,
+                                         data_sync_ts,
+                                         false,
+                                         false,
+                                         last_sync_ts,
+                                         status,
+                                         hres);
             }
         }
     }
@@ -3047,49 +3061,42 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     assert(!bucket_ids.empty());
     for (auto &table_name : hash_partitioned_tables)
     {
-        if (EnqueueDataSyncTaskToCore(
-                table_name,
-                ng_id,
-                ng_term,
-                data_sync_ts,
-                Sharder::Instance().ShardBucketIdToCoreIdx(
-                    bucket_ids[0]),  // all buckets passed in should land on the
-                                     // same core
-                false,
-                false,
-                false,
-                status,
-                hres,
-                send_cache_for_migration,
-                [bucket_ids](size_t key_hash) -> bool
+        EnqueueDataSyncTaskToCore(
+            table_name,
+            ng_id,
+            ng_term,
+            data_sync_ts,
+            Sharder::Instance().ShardBucketIdToCoreIdx(
+                bucket_ids[0]),  // all buckets passed in should land on the
+                                 // same core
+            false,
+            false,
+            false,
+            status,
+            hres,
+            send_cache_for_migration,
+            [bucket_ids](size_t key_hash) -> bool
+            {
+                uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
+                for (uint16_t target_id : bucket_ids)
                 {
-                    uint16_t bucket_id =
-                        Sharder::MapKeyHashToBucketId(key_hash);
-                    for (uint16_t target_id : bucket_ids)
+                    if (bucket_id == target_id)
                     {
-                        if (bucket_id == target_id)
-                        {
-                            return true;
-                        }
+                        return true;
                     }
-                    return false;
-                }))
-        {
-            unfinished_task_cnt++;
-        }
+                }
+                return false;
+            });
     }
 
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
-        status->all_task_started_ = true;
-        status->unfinished_tasks_ += unfinished_task_cnt;
-        status->unfinished_scan_tasks_ += unfinished_task_cnt;
-        if (status->unfinished_tasks_ == 0)
+        if (status->EndEnqueuingLocked())
         {
-            hres->SetFinished();
+            status->FinishLocked(hres);
             return;
         }
-        if (status->unfinished_scan_tasks_ == 0)
+        if (status->WaitsForFlushBufferLocked())
         {
             FlushCurrentFlushBuffer();
             return;
@@ -3755,6 +3762,18 @@ void LocalCcShards::DataSyncForRangePartition(
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
+    // Test hook: holds the task here, before it takes latest_ckpt_flush_ts_
+    // and scans, while the fault stays armed. The checkpoint rounds started
+    // meanwhile merge into this task (it is still the partition's
+    // ckpt_flush_task_), which a test watches through the concluded-cycle
+    // count.
+    CODE_FAULT_INJECTOR("ckpt_hold_data_sync_task", {
+        FaultInject::Instance().HoldWhileArmed(
+            "ckpt_hold_data_sync_task",
+            "the data sync task of " + std::string(table_name.StringView()) +
+                " range " + std::to_string(data_sync_task->id_) + " of ng#" +
+                std::to_string(ng_id));
+    });
     int64_t expected_ng_term = data_sync_task->node_group_term_;
     int32_t range_id = data_sync_task->id_;
     bool is_dirty = data_sync_task->is_dirty_;
@@ -3806,30 +3825,35 @@ void LocalCcShards::DataSyncForRangePartition(
         }
         else
         {
+            // Adopt the pending timestamp before the ownership check, so that
+            // this task stops being the limiter's ckpt_flush_task_ under the
+            // limiter's mutex on every path that finishes it. On the
+            // not-owner path below, the task finishes before PopPendingTask()
+            // drops the limiter; a round arriving in between would otherwise
+            // attach its status to this task after this task had released
+            // its attached statuses, and that round would never conclude.
+            if (data_sync_task->SyncTsAdjustable())
+            {
+                auto task_limiter_key = TaskLimiterKey(ng_id,
+                                                       expected_ng_term,
+                                                       table_name.StringView(),
+                                                       table_name.Type(),
+                                                       table_name.Engine(),
+                                                       range_id);
+                std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
+                auto iter = task_limiters_.find(task_limiter_key);
+                assert(iter != task_limiters_.end());
+                uint64_t latest_ckpt_flush_ts =
+                    iter->second->TakeLatestCkptFlushTs();
+                data_sync_task->data_sync_ts_ = std::max(
+                    latest_ckpt_flush_ts, data_sync_task->data_sync_ts_);
+                data_sync_task->UnsetSyncTsAdjustable();
+            }
+
             NodeGroupId range_ng =
                 GetRangeOwnerInternal(range_id, ng_id)->BucketOwner();
             if (range_ng == ng_id)
             {
-                if (data_sync_task->SyncTsAdjustable())
-                {
-                    auto task_limiter_key =
-                        TaskLimiterKey(ng_id,
-                                       expected_ng_term,
-                                       table_name.StringView(),
-                                       table_name.Type(),
-                                       table_name.Engine(),
-                                       range_id);
-                    std::lock_guard<std::mutex> task_limiter_lk(
-                        task_limiter_mux_);
-                    auto iter = task_limiters_.find(task_limiter_key);
-                    assert(iter != task_limiters_.end());
-                    uint64_t latest_pending_task_ts =
-                        iter->second->UnsetLatestPendingTs();
-                    data_sync_task->data_sync_ts_ = std::max(
-                        latest_pending_task_ts, data_sync_task->data_sync_ts_);
-                    data_sync_task->UnsetSyncTsAdjustable();
-                }
-
                 // For dirty tables (create index in process), data older than
                 // last sync ts will be continously written into memory. We
                 // cannot rely on last sync ts to determin if there's dirty data
@@ -4787,12 +4811,12 @@ void LocalCcShards::DataSyncForHashPartition(
             std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
             auto iter = task_limiters_.find(task_limiter_key);
             assert(iter != task_limiters_.end());
-            // Now, This task is runing. we call `UnsetLatestPendingTs` to make
-            // anothe task could push to PendingTaskQueue.
-            uint64_t lateset_pending_task_ts =
-                iter->second->UnsetLatestPendingTs();
-            data_sync_task->data_sync_ts_ = std::max(
-                lateset_pending_task_ts, data_sync_task->data_sync_ts_);
+            // This checkpoint flush task starts: it takes the timestamp of the
+            // rounds merged into it, and a later round enqueues a new task.
+            uint64_t latest_ckpt_flush_ts =
+                iter->second->TakeLatestCkptFlushTs();
+            data_sync_task->data_sync_ts_ =
+                std::max(latest_ckpt_flush_ts, data_sync_task->data_sync_ts_);
             data_sync_task->UnsetSyncTsAdjustable();
         }
 
@@ -6324,8 +6348,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
     // Non-MVCC EloqStore publishes ckpt ts per partition from
     // PartitionBatchCallback. Stores requiring PersistKV, and all MVCC
     // flushes, publish in the deferred block above after the full durability
-    // boundary. UpdateCceCkptTsCc restarts each affected shard's eviction scan
-    // in either path.
+    // boundary. In either path, UpdateCceCkptTsCc tells each affected shard's
+    // cleaner that entries became evictable (CcShard::OnDirtyDataFlushed()).
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
