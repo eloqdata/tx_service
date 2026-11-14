@@ -177,8 +177,8 @@ bool Checkpointer::IsCurrentCheckpointTerm(NodeGroupId node_group_id,
     }
 
     Sharder &sharder = Sharder::Instance();
-    if (sharder.LeaderTerm(node_group_id) == term ||
-        sharder.CandidateLeaderTerm(node_group_id) == term)
+    const NodeGroupTerms terms = sharder.LeaderTerms(node_group_id);
+    if (terms.leader_ == term || terms.candidate_ == term)
     {
         return true;
     }

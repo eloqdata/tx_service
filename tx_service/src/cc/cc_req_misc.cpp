@@ -122,11 +122,9 @@ bool FetchCatalogCc::ValidTermCheck()
     }
     else
     {
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-        if (cc_ng_term < 0)
-        {
-            cc_ng_term = Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
-        }
+        const NodeGroupTerms terms = Sharder::Instance().LeaderTerms(cc_ng_id_);
+        const int64_t cc_ng_term =
+            terms.leader_ < 0 ? terms.candidate_ : terms.leader_;
 
         if (cc_ng_term != cc_ng_term_)
         {

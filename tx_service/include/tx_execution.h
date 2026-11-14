@@ -276,14 +276,17 @@ public:
     bool CheckLeaderTerm() const
     {
         NodeGroupId ng_id = TxCcNodeId();
-        if (Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm()) ||
-            (TxStatus() == TxnStatus::Recovering &&
-             Sharder::Instance().CandidateLeaderTerm(ng_id) >= 0))
+        if (TxStatus() != TxnStatus::Recovering)
         {
-            return true;
+            return Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm());
         }
 
-        return false;
+        // A recovered transaction is also valid while the node is still the
+        // candidate leader. Both terms come from one read, so that the check
+        // does not fail at the moment replay finishes.
+        const NodeGroupTerms terms = Sharder::Instance().LeaderTerms(ng_id);
+        return (terms.leader_ >= 0 && terms.leader_ == TxTerm()) ||
+               terms.candidate_ >= 0;
     }
 
     bool CheckStandbyTerm() const

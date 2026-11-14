@@ -776,8 +776,7 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
          &local_shards = this->local_shards_]()
         {
             int64_t leader_term = INIT_TERM;
-            while (Sharder::Instance().LeaderTerm(ng_id) < 0 &&
-                   Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+            while (Sharder::Instance().LeaderTerms(ng_id).Replaying())
             {
                 // The RPC server can receive the remote request, but this
                 // node has not finish log replay, including data(.pk) log and
@@ -1175,8 +1174,7 @@ void CcNodeService::GenerateSkFromPk(
          tx_number,
          tx_term]()
         {
-            while (Sharder::Instance().LeaderTerm(ng_id) < 0 &&
-                   Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+            while (Sharder::Instance().LeaderTerms(ng_id).Replaying())
             {
                 // The RPC server can receive the remote request, but this
                 // node has not finish log replay, including data(.pk) log and
@@ -2186,9 +2184,9 @@ void CcNodeService::FetchNodeInfo(
     response->set_ng_id(ng_id);
     response->set_node_id(node_id);
 
-    const int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id);
-    const int64_t candidate_term =
-        Sharder::Instance().CandidateLeaderTerm(ng_id);
+    const NodeGroupTerms terms = Sharder::Instance().LeaderTerms(ng_id);
+    const int64_t leader_term = terms.leader_;
+    const int64_t candidate_term = terms.candidate_;
     if (leader_term > 0)
     {
         response->set_role(NodeRole::LeaderNode);

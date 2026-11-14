@@ -1751,8 +1751,9 @@ uint64_t LocalCcShards::CountSlices(const TableName &table_name,
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition,
                                table_name.Engine());
-    assert(Sharder::Instance().LeaderTerm(local_ng_id) >= 0 ||
-           Sharder::Instance().CandidateLeaderTerm(local_ng_id) >= 0);
+    [[maybe_unused]] const NodeGroupTerms local_ng_terms =
+        Sharder::Instance().LeaderTerms(local_ng_id);
+    assert(local_ng_terms.leader_ >= 0 || local_ng_terms.candidate_ >= 0);
 
     uint64_t slices = 0;
 

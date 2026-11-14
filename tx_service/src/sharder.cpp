@@ -636,6 +636,25 @@ int64_t Sharder::CandidateLeaderTerm(uint32_t ng_id) const
     return candidate_leader_term_cache_[ng_id].load(std::memory_order_acquire);
 }
 
+NodeGroupTerms Sharder::LeaderTerms(uint32_t ng_id) const
+{
+    NodeGroupTerms terms;
+    if (!cc_nodes_init_.load(std::memory_order_acquire))
+    {
+        return terms;
+    }
+
+    // The candidate leader term first: when replay finishes, the cc node
+    // stores the leader term and then clears the candidate leader term. A
+    // load that sees the candidate leader term cleared is therefore followed
+    // by a load that sees the leader term set. In the opposite order, both
+    // loads can miss the term the node holds.
+    terms.candidate_ =
+        candidate_leader_term_cache_[ng_id].load(std::memory_order_acquire);
+    terms.leader_ = leader_term_cache_[ng_id].load(std::memory_order_acquire);
+    return terms;
+}
+
 void Sharder::UpdateLeaders()
 {
     std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
@@ -682,8 +701,7 @@ int64_t Sharder::FetchLeaderTerm(uint32_t ng_id, uint32_t node_id)
 {
     if (node_id == node_id_)
     {
-        const int64_t leader_term = LeaderTerm(ng_id);
-        return leader_term > 0 ? leader_term : CandidateLeaderTerm(ng_id);
+        return LeaderTerms(ng_id).LeaderOrCandidate();
     }
     std::shared_ptr<brpc::Channel> channel = GetCcNodeServiceChannel(node_id);
     if (channel == nullptr)
